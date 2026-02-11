@@ -147,6 +147,10 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 ## 2. Architecture
 
+**Note:** §2.8 traces a complete example through every step described below — you may want to read it alongside these sections.
+
+**Terminology:** Key terms are defined when first introduced. A complete glossary is in Appendix D.
+
 ### 2.1. Two-Level Dispatch
 
 StreamHash partitions keys into fixed-size groups called *blocks*, each containing a few thousand keys. It uses a **two-level dispatch** model separating framework concerns from algorithm-specific logic:
@@ -174,7 +178,7 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 | `k0` | The same first 8 bytes interpreted as **little-endian** uint64 (= `ReverseBytes64(prefix)`). Used by **algorithms** for slot/bucket computation. Little-endian is the native integer format on most CPUs, avoiding byte-swap overhead in hash arithmetic. |
 | `k1` | Bytes 8-15 of a key as **little-endian** uint64. Used by **algorithms** for slot/bucket computation. Completely independent of `prefix` — different bytes of the key. |
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query. |
-| Bucket | A group of keys within a block, sharing a routing prefix. Algorithm-internal concept. |
+| Bucket | A small group of keys within a block that share the same bucket index (computed by the algorithm from the key's hash values). The algorithm searches for a seed that makes the hash collision-free within each bucket. |
 | Slot | Position within a block (0 to keysInBlock-1). Output of the algorithm for a specific key. |
 | Rank | Final MPHF output (0 to N-1). Computed as `keysBefore + localSlot`. |
 | `numBlocks` | Total blocks in the index. Determined by the algorithm based on its own parameters. |
@@ -200,12 +204,14 @@ function fastRange32(hash: uint64, n: uint32) → uint32:
 
 This is monotonic: sorted prefixes map to non-decreasing block indices. This property enables streaming construction — keys can be processed in prefix-sorted order, completing one block at a time.
 
-The framework asks the algorithm for `numBlocks` at construction time. Each algorithm computes this from its own parameters (e.g., lambda and bucketsPerBlock — see §6 and §7 for algorithm-specific values):
+The framework asks the algorithm for `numBlocks` at construction time. Each algorithm computes this from its own parameters (lambda — the target average number of keys per bucket (3.0 for Bijection, 3.16 for PTRHash), and bucketsPerBlock — the number of buckets per block; see §6 and §7 for algorithm-specific values):
 
 ```
 totalBuckets = ceil(N / lambda)
 numBlocks    = max(2, ceil(totalBuckets / bucketsPerBlock))
 ```
+
+For example, with Bijection (lambda=3, bucketsPerBlock=1024): 10M keys → ~3.33M buckets → 3,256 blocks of ~3,072 keys each.
 
 Note: Keys in the same block share similar prefix values, but k1 (bytes 8-15) is
 independent of prefix, and slot computation depends on both k0 and k1 for full 128-bit collision resistance.
@@ -379,6 +385,10 @@ The table below compares StreamHash against alternative MPHF constructions. "O(N
 | Bloom Filter | ~10 | O(N) | k reads | Yes (probabilistic) | Different purpose |
 
 StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming RecSplit for faster build times. The framework itself is algorithm-agnostic — a streaming RecSplit implementation could be plugged in to achieve similar bits/key with the same bounded-RAM construction (see §4.5).
+
+**When StreamHash is overkill:**
+- Fewer than ~100K keys — the block overhead dominates; use a simple hash table or a monolithic MPHF
+- Dynamic dataset — StreamHash is static; use a hash table or cuckoo filter instead
 
 ---
 
@@ -561,7 +571,7 @@ Algorithm-specific configuration. Currently zero-length for both Bijection and P
 
 ### 5.4. RAM Index
 
-The RAM index contains `NumBlocks + 1` entries (the extra entry is a sentinel for the last block).
+The RAM index contains `NumBlocks + 1` entries (the extra entry is a sentinel entry — an extra entry beyond the last real block, used to compute the last block's size by subtraction).
 
 **Entry format (10 bytes):**
 
@@ -609,7 +619,7 @@ Fingerprints are stored first within each entry for efficient access during veri
 
 Contains per-block metadata in block order. Each block's metadata is variable-length and algorithm-specific:
 
-- **Bijection:** Checkpoints (28B) + Elias-Fano data + Golomb-Rice seed stream + fallback list
+- **Bijection:** Checkpoints (28B) + Elias-Fano data (a succinct representation for monotonically increasing integer sequences — see §6.5) + Golomb-Rice seed stream (a variable-length encoding efficient for geometrically distributed values — see §6.6) + fallback list
 - **PTRHash:** Pilot bytes (bucketsPerBlock bytes) + remap table
 
 **Empty blocks** (keysInBlock = 0) still have metadata entries:
@@ -829,11 +839,11 @@ StreamHash's PTRHash adaptation is based on PtrHash by [Groot Koerkamp](https://
 
 PTRHash is normally built as a monolithic O(N)-RAM structure over millions of keys per part. StreamHash adapts it for streaming construction with small, fixed-size blocks (~31,600 keys each), enabling bounded-RAM builds while preserving PTRHash's O(1) query performance.
 
-The adaptation uses CubicEps bucket distribution, 8-bit pilots (0-255) with cuckoo hashing (a hash table technique where items can be displaced to alternative positions to resolve collisions) for collision resolution, and a remap table for overflow slots. Queries decode pilots directly (no EF/GR).
+The adaptation uses CubicEps bucket distribution (a skewed assignment that creates a few large buckets and many small ones — see §7.2), 8-bit pilots (0-255) with cuckoo hashing (a hash table technique where items can be displaced to alternative positions to resolve collisions) for collision resolution, and a remap table for overflow slots. Queries decode pilots directly (no EF/GR).
 
 **Parameters:**
 - `lambda = 3.16` (average keys per bucket)
-- `alpha = 0.99` (slot overflow factor: `numSlots = ceil(keysInBlock / alpha)`)
+- `alpha = 0.99` (the slot overflow factor; numSlots = ceil(keysInBlock / alpha), so α = 0.99 means 1% extra slots)
 - `bucketsPerBlock = 10,000`
 - `numPilotValues = 256` (pilots 0-255)
 
@@ -1300,7 +1310,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | k0 | First 8 bytes of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.2) |
 | k1 | Bytes 8-15 of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.2) |
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query |
-| Bucket | Group of keys within a block; algorithm-internal concept |
+| Bucket | A small group of keys within a block that share the same bucket index (computed by the algorithm from the key's hash values) |
 | Slot | Position within a block (0 to keysInBlock-1); output of the algorithm for a key |
 | Bucket Seed / Pilot | Per-bucket parameter that makes the hash collision-free within a bucket |
 | Global Seed | 64-bit header value that randomizes slot assignment across the entire index |
