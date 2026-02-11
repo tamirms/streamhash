@@ -198,7 +198,7 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 | `k0` | The same first 8 bytes interpreted as **little-endian** uint64 (= `ReverseBytes64(prefix)`). Used by **algorithms** for slot/bucket computation. Little-endian is the native integer format on most CPUs, avoiding byte-swap overhead in hash arithmetic. |
 | `k1` | Bytes 8-15 of a key as **little-endian** uint64. Used by **algorithms** for slot/bucket computation. Completely independent of `prefix` — different bytes of the key. |
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query. |
-| Bucket | A small group of keys within a block that share the same group index (computed by the algorithm from the key's hash values). The algorithm searches for a seed that makes the hash collision-free within each group. |
+| Bucket | A partitioning mechanism used by MPHF algorithms to divide keys into small groups (averaging ~3 keys) that can each be solved independently. Constructing a perfect hash for all keys at once would be computationally infeasible; buckets make the problem tractable by breaking it into many trivial subproblems. Keys are assigned to buckets based on their hash values, and the algorithm searches for a seed/pilot for each bucket that produces collision-free slot assignments. |
 | Slot | Position within a block (0 to keysInBlock-1). Output of the algorithm for a specific key. |
 | Rank | Final MPHF output (0 to N-1). Computed as `keysBefore + localSlot`. |
 | `numBlocks` | Total blocks in the index. Determined by the algorithm based on its own parameters. |
@@ -1452,7 +1452,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | k0 | First 8 bytes of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.3) |
 | k1 | Bytes 8-15 of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.3) |
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query |
-| Bucket | A small group of keys within a block that share the same bucket index (computed by the algorithm from the key's hash values) |
+| Bucket | A partitioning mechanism that divides keys into small groups (averaging ~3 keys) for independent solving. Buckets make MPHF construction tractable by breaking an infeasible problem into many trivial subproblems. |
 | Slot | Position within a block (0 to keysInBlock-1); output of the algorithm for a key |
 | Bucket Seed / Pilot | Per-bucket parameter that makes the hash collision-free within a bucket |
 | Global Seed | 64-bit header value that randomizes slot assignment across the entire index |
