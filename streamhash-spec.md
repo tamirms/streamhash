@@ -903,7 +903,7 @@ function PilotHash(pilot, globalSeed) → hp:
     return x | 1   // ensure odd (bijective multiplication) and non-zero
 ```
 
-The SplitMix64 finalizer is critical for pilot independence. See §7.11 for why this diverges from canonical PTRHash.
+**Design note:** The SplitMix64 finalizer is not present in canonical PTRHash. StreamHash adds it to ensure pilot independence at small block sizes (~31,600 keys). Without this finalizer, correlated pilots waste attempts and increase build failure probability. With it, effectively all 256 pilots produce independent hash patterns, reducing the failure rate at 1T keys from ~1 in 30 builds to ~1 in 7,200 builds. See §7.11 for detailed analysis.
 
 ### 7.4. Slot Computation
 
@@ -914,6 +914,8 @@ function PilotSlotFromHashes(k0, k1, pilot, numSlots, globalSeed) → slot:
     slot = fastRange32((slotInput ^ (slotInput >> 32)) × hp, numSlots)
     return slot
 ```
+
+**Design note:** This diverges from canonical PTRHash in two ways: (1) multiplication mixing (`× hp`) replaces XOR mixing (`^ hp`) for stronger avalanche properties, and (2) `k0 ^ k1` replaces a single hash half for 128-bit collision resistance. The XOR of both key halves ensures the slot input is independent of the k1-only bucket assignment. See §7.9 and §7.10 for analysis.
 
 Key points:
 - **Slot input is `k0 ^ k1`**, not just `k1`. This ensures 128-bit collision resistance. See §7.10.
@@ -976,9 +978,9 @@ function QuerySlotPTRHash(k0, k1, metadata, keysInBlock) → localSlot:
 Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.5 for the
 unified hybrid extraction strategy using a mixer over both k0 and k1.
 
-### Divergences from Canonical PTRHash (§7.9–§7.14)
+### PTRHash Divergence Summary (§7.9–§7.14)
 
-The following subsections document where StreamHash's PTRHash adaptation diverges from the Rust PtrHash implementation by Groot Koerkamp. Each divergence is motivated by StreamHash's small, fixed-size blocks (~31,600 keys) — substantially smaller than the Rust implementation's dynamic part sizes (millions of keys). At this smaller scale, several aspects of the original design (XOR mixing, 64-bit slot input, simple pilot hashing) become unreliable, requiring the modifications described below.
+The following subsections provide detailed reference and comparison for where StreamHash's PTRHash adaptation diverges from the Rust PtrHash implementation by Groot Koerkamp. Each divergence is cross-referenced from the relevant algorithm section above and is motivated by StreamHash's small, fixed-size blocks (~31,600 keys) — substantially smaller than the Rust implementation's dynamic part sizes (millions of keys). At this smaller scale, several aspects of the original design (XOR mixing, 64-bit slot input, simple pilot hashing) become unreliable, requiring the modifications described below.
 
 ### 7.9. Divergence: Slot Mixing — Multiplication instead of XOR
 
@@ -1011,15 +1013,17 @@ With MUL mixing (`slot = fastRange32((h ^ (h >> 32)) × hp, n)`), the collision 
 | | Rust PTRHash | StreamHash |
 |---|---|---|
 | Pilot hash | `C × (pilot ^ seed)` | SplitMix64 finalizer on `C × (pilot ^ seed)`, then `| 1` |
-| K_eff (measured) | ~3-5 | ~253-259 |
+| Effectively independent pilots (measured) | ~3–5 out of 256 | ~253–259 out of 256 |
 
-**Why:** Pilot independence (K_eff) measures how many effectively independent pilot values are available. It is estimated by fitting observed per-bucket failure rates to the model P(all 256 pilots fail) = (1 − p)^K_eff, where p is the single-pilot success probability for the largest bucket. Over 10,000 random key sets, the fitted K_eff is 253–259 with SplitMix64, compared to 180–225 without. At 1T keys (~31.6M blocks):
+**Why:** When pilots are correlated, many pilot values attempt essentially the same hash assignments, wasting attempts and increasing build failure probability. With the SplitMix64 finalizer, effectively all 256 pilots produce independent hash patterns. Over 10,000 random key sets, ~253–259 pilots behave independently with SplitMix64, compared to 180–225 without. At 1T keys (~31.6M blocks):
 - **Without SplitMix64:** ~1 in 30 builds fails
 - **With SplitMix64:** ~1 in 7,200 builds fails
 
+*Note on estimation:* The effectively independent pilot count can be estimated by fitting observed per-bucket failure rates to the model P(all 256 pilots fail) = (1 − p)^K, where p is the single-pilot success probability for the largest bucket and K is the effective count.
+
 The `| 1` in PilotHash (§7.3) ensures the result is odd (bijective multiplication mod 2^64) and prevents `hp = 0`.
 
-**How Rust compensates:** The Rust implementation uses the Vigna formula to compute very large part sizes (~millions of keys per part). At that scale, even K_eff ≈ 3-5 works because individual bucket failure probabilities are extremely small relative to the slot pool. StreamHash's small blocks (31,600 keys) require high K_eff.
+**How Rust compensates:** The Rust implementation uses the Vigna formula to compute very large part sizes (~millions of keys per part). At that scale, even with only a few effectively independent pilots, individual bucket failure probabilities are extremely small relative to the slot pool. StreamHash's small blocks (31,600 keys) require high pilot independence.
 
 ### 7.12. Divergence: Block Sizing — Fixed 10K Buckets instead of Dynamic Vigna Formula
 
@@ -1063,9 +1067,41 @@ Keys arrive in non-decreasing prefix order. The framework routes each key to its
 
 #### 8.1.2. Unsorted Mode
 
-For unsorted input, the framework writes each key to a memory-mapped temp file, organized by block region. During finalization, it reads blocks back in order and invokes the solver for each. The temp file is deleted after construction.
+For unsorted input, the framework uses a **two-pass construction** process:
 
-**Normative requirement:** The solver must receive all keys for block N before block N+1 — keys must be grouped by block ID before solving.
+**Pass 1: Routing to temp file**
+- Each key is routed to its block using `blockIdx = fastRange32(prefix, numBlocks)`
+- Keys are written to block-specific regions in a memory-mapped temp file
+- The temp file contains `numBlocks` contiguous regions, each sized for `regionCapacity` entries
+
+**Temp file layout:**
+```
+[Region 0: regionCapacity entries]
+[Region 1: regionCapacity entries]
+...
+[Region numBlocks-1: regionCapacity entries]
+```
+
+**Entry format:**
+```
+[keyLen: uint16_le][key: keyLen bytes][payload: PayloadSize bytes]
+```
+
+The `uint16_le` key-length field limits keys to ≤ 65,535 bytes (see §1.3). In practice, keys are typically 16–64 bytes (hash outputs); this limit exists only as a safety check.
+
+**Per-block write cursors:**
+- An array of `numBlocks` counters tracks the write position within each block's region
+- This small RAM cost (e.g., ~126 KB for 31.6M blocks at 1T keys) enables concurrent writes without coordination
+
+**Pass 2: Read-back and solving**
+- Blocks are read back sequentially in order (block 0, block 1, ...)
+- For each block, the framework reads entries from `[region_start, region_start + cursor_value)` where cursor_value is the final write position for that block
+- The solver receives all keys for the block and produces metadata
+- This ensures the normative requirement: the solver receives all keys for block N before block N+1
+
+**Overflow handling:**
+- If a block's region fills up (cursor reaches `regionCapacity`), the builder returns `ErrRegionOverflow`
+- The 7σ Poisson margin (see below) makes this extremely unlikely (~10⁻¹² per block)
 
 **Temp file sizing:** Uses a dynamic 7σ Poisson margin instead of a fixed percentage:
 ```
@@ -1076,7 +1112,7 @@ regionSize = regionCapacity × entrySize
 tempFileSize = numBlocks × regionSize
 ```
 
-The 7σ margin provides ~10⁻¹² overflow probability per block (Gaussian tail Q(7) ≈ 1.28×10⁻¹²).
+The 7σ margin provides ~10⁻¹² overflow probability per block (Gaussian tail Q(7) ≈ 1.28×10⁻¹²). The temp file is deleted after construction.
 
 #### 8.1.3. Parallel Mode
 
@@ -1329,7 +1365,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | fastRange32 | Block/bucket routing: `bucket = hi64(hash × n)`. Monotonic for sorted prefixes. See §2.3. |
 | lambda | Target average keys per bucket (3.0 for Bijection, 3.16 for PTRHash) |
 | alpha | PTRHash slot overflow factor (0.99); numSlots = ceil(N/alpha) |
-| K_eff | Effective independent pilot count (256 = fully independent) |
+| Effectively independent pilots | Measure of pilot value independence in PTRHash; the number of pilots (out of 256) that produce truly independent hash patterns. Higher values reduce build failure probability. See §7.11. |
 | CubicEps | Skewed bucket distribution: x²(1+x)/2 × 255/256 + x/256 |
 | Checkpoints | 28-byte block metadata enabling O(128) decode instead of O(1024) |
 | Separated Layout | File layout where payloads are in a contiguous region separate from block metadata |
