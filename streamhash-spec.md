@@ -657,7 +657,7 @@ Where Bijection diverges from RecSplit: it replaces RecSplit's tree-based recurs
 - `lambda = 3.0` (average keys per bucket)
 - `bucketsPerBlock = 1024` — chosen to balance metadata size, query decode cost, and block count. At lambda=3, each block holds ~3,072 keys. With 128-bucket checkpoints, query decode scans at most 128 buckets. Increasing `bucketsPerBlock` reduces the number of blocks (and RAM index size) but increases per-block metadata and decode cost. 1024 keeps metadata per block to ~1 KB typical, fitting within a single 4 KB page.
 - `splitThreshold = 8` (buckets ≥ 8 keys use splitting)
-- `checkpointInterval = 128`
+- `checkpointInterval = 128` — byte offsets are stored every 128 buckets to enable O(128) decode (see §5.7)
 
 ### 5.2. Bucket Assignment
 
@@ -798,7 +798,7 @@ Offset  Size          Content
 end-FL  variable      Fallback list (see below)
 ```
 
-**Checkpoints** are at 128-bucket intervals, enabling O(128) decode: skip directly to the segment containing the target bucket.
+**Checkpoints** store byte offsets at 128-bucket intervals (buckets 128, 256, 384, ..., 896), enabling O(128) decode instead of O(1024). Each checkpoint records two uint16 offsets: the starting position in the Elias-Fano stream and the starting position in the Golomb-Rice seed stream. This allows queries to skip directly to the relevant segment without decoding from the beginning. Bucket 0 is implicit (offset 0), so 7 checkpoints cover all 1024 buckets.
 
 **Fallback list encoding:**
 
@@ -1416,7 +1416,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | alpha | PTRHash slot overflow factor (0.99); numSlots = ceil(N/alpha) |
 | Effectively independent pilots | Measure of pilot value independence in PTRHash; the number of pilots (out of 256) that produce truly independent hash patterns. Higher values reduce build failure probability. See §6.11. |
 | CubicEps | Skewed bucket distribution: x²(1+x)/2 × 255/256 + x/256 |
-| Checkpoints | 28-byte block metadata enabling O(128) decode instead of O(1024) |
+| Checkpoints | Bijection: 28-byte metadata (7 × uint16 pairs) storing byte offsets into Elias-Fano and Golomb-Rice streams at 128-bucket intervals. Enables O(128) decode by allowing queries to skip to the relevant segment instead of decoding from the beginning. See §5.7. |
 | Separated Layout | File layout where payloads are in a contiguous region separate from block metadata |
 | Streaming Construction | Building the index with bounded RAM regardless of dataset size |
 | Remap Table | PTRHash overflow table mapping slots ≥ numKeys to holes in [0, numKeys) |
