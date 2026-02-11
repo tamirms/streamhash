@@ -590,6 +590,35 @@ Application-defined data. Not interpreted by the index. Can be zero-length.
 ```
 Algorithm-specific configuration. Currently zero-length for both Bijection and PTRHash (they use compile-time constants). Future algorithms may store tunable parameters here.
 
+**Hex dump example:** Here's what a minimal index looks like for 5 keys in 2 blocks using Bijection (MPHF mode, no fingerprints):
+
+```
+Offset  Hex bytes                                       Description
+──────────────────────────────────────────────────────────────────────
+0000    48 4D 54 53 01 00 05 00 00 00 00 00 00 00      Header: Magic "STMH", Version 1
+0010    02 00 00 00 01 00 00 00 00 00 12 34 56 78      NumBlocks=2, RAMBits=1, PayloadSize=0
+0020    9A BC DE F0 00 00 00 00 00 00 00 00 00 00      FingerprintSize=0, Seed=0x..., BlockAlgorithm=0
+0030    00 00 00 00 00 00 00 00 00 00 00 00 00 00      Reserved (zeros)
+0040    00 00 00 00                                    UserMetadataLen = 0 (no user metadata)
+0044    00 00 00 00                                    AlgoConfigLen = 0 (no algo config)
+0048    00 00 00 00 00 00 00 00 00 00                 RAM Index entry 0: KeysBefore=0, MetadataOffset=0
+0052    03 00 00 00 00 A5 00 00 00 00                 RAM Index entry 1: KeysBefore=3, MetadataOffset=0xA5
+005C    05 00 00 00 00 42 01 00 00 00                 RAM Index entry 2 (sentinel): KeysBefore=5, MetadataOffset=0x142
+0066    (empty payload region, PayloadSize=0)
+0066    1C 00 1C 00 ... (Bijection metadata block 0)   Block 0 metadata (~165 bytes)
+010B    1C 00 1C 00 ... (Bijection metadata block 1)   Block 1 metadata (~221 bytes)
+01E6    [32 bytes footer with hashes]                  Footer
+```
+
+This example shows:
+- Header at offset 0 (64 bytes)
+- UserMetadataLen at 0x40 (4 bytes, value = 0)
+- AlgoConfigLen at 0x44 (4 bytes, value = 0)
+- RAM Index at 0x48 (3 entries × 10 bytes = 30 bytes)
+- Empty payload region (no payloads in MPHF mode)
+- Metadata region starts immediately with block 0's metadata
+- Footer at the end
+
 ### 5.4. RAM Index
 
 The RAM index contains `NumBlocks + 1` entries (the extra entry is a sentinel entry — an extra entry beyond the last real block, used to compute the last block's size by subtraction).
@@ -748,6 +777,28 @@ Lower bits: n × lowBits bits (packed, LSB first)
 Upper bits: n + (U >> lowBits) bits (unary gaps between values)
 ```
 
+**Worked example:** Encoding cumulative bucket sizes for a small block with 8 buckets and 12 keys:
+
+```
+Bucket sizes: [2, 1, 3, 0, 2, 1, 1, 2]
+Cumulative:   [0, 2, 3, 6, 6, 8, 9, 10, 12]
+
+U = 12, n = 8
+lowBits = floor(log2(12/8)) = floor(log2(1)) = 0
+
+Since lowBits = 0, all bits go to the upper bits (unary encoding):
+Upper bits represent gaps between cumulative values:
+  Gap from 0→2: 2 zeros, then 1
+  Gap from 2→3: 1 zero, then 1
+  Gap from 3→6: 3 zeros, then 1
+  ... and so on
+
+Upper bits: 0010110001010011  (n + U/2^lowBits bits = 8 + 12 = 20 bits)
+Lower bits: (empty, since lowBits = 0)
+```
+
+For larger blocks with more keys, lowBits > 0, and the lower bits store the low-order bits of each cumulative value while the upper bits store the high-order bits in unary encoding.
+
 ### 6.6. Golomb-Rice Seed Encoding
 
 Seeds are encoded using Golomb-Rice coding with parameter `k` derived from bucket size:
@@ -770,6 +821,33 @@ Fallback marker: 16 consecutive ones (indicates seed is in fallback list)
 | k           | 0 | 0 | 1 | 2 | 3 | 4 | 5 | 7 | 8   |
 
 Size-0 and size-1 buckets emit nothing in the seed stream (always seed=0). The maximum quotient before fallback is 15 (since 16 ones = fallback marker), so the maximum encodable seed is `(16 << k) - 1`. Seeds exceeding this are stored in the fallback list.
+
+**Worked example:** Encoding seed value 13 for a bucket of size 3:
+
+```
+bucketSize = 3
+k = golombParameter(3) = 2
+seed = 13
+
+quotient  = 13 >> 2 = 3
+remainder = 13 & ((1 << 2) - 1) = 13 & 3 = 1
+
+Encoding: 3 ones + 0 terminator + 2 remainder bits
+Binary: 1110  (3 ones + 0) followed by 01 (remainder = 1 in 2 bits)
+Result: 111001  (6 bits total)
+```
+
+Another example with a larger seed requiring fallback:
+
+```
+bucketSize = 3, k = 2
+Maximum encodable: (16 << 2) - 1 = 63
+seed = 70  (exceeds maximum)
+
+Encoding: 16 consecutive ones (fallback marker)
+Binary: 1111111111111111  (16 bits)
+The actual seed value (70) is stored in the fallback list at the end of the metadata block.
+```
 
 **Split buckets (size ≥ 8):** Emit two consecutive Golomb-Rice codes in the seed stream. The first code encodes `seed0` using `golombParameter(splitPoint)` where `splitPoint = bucketSize / 2`. The second encodes `seed1` using `golombParameter(bucketSize - splitPoint)`. Either or both may be fallback markers (16 consecutive ones) if the seed exceeds the encodable range.
 
