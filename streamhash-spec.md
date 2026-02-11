@@ -247,8 +247,9 @@ independent of prefix, and slot computation depends on both k0 and k1 for full 1
 
 ### 2.5. Query Pseudocode (Framework Level)
 
-This is the complete framework-level query path, showing how the two-level dispatch works:
+This shows how the two-level dispatch works. The core query path computes the rank; optional fingerprint verification (when configured) can detect non-member keys.
 
+**Core query path:**
 ```
 function Query(key) → (globalRank, error):
     // Framework: parse key
@@ -277,14 +278,16 @@ function Query(key) → (globalRank, error):
     // Framework: compute global rank
     globalRank = keysBefore + localSlot
 
-    // Framework: verify fingerprint (if configured)
-    if fingerprintSize > 0:
-        storedFP  = readFingerprint(payloadRegion, globalRank)
-        expectedFP = extractFingerprintHybrid(key, k0, k1)
-        if storedFP != expectedFP:
-            return error(FingerprintMismatch)
-
     return globalRank
+```
+
+**Optional fingerprint verification (when FingerprintSize > 0):**
+```
+    // After computing globalRank, verify fingerprint to detect non-members
+    storedFP  = readFingerprint(payloadRegion, globalRank)
+    expectedFP = extractFingerprintHybrid(key, k0, k1)
+    if storedFP != expectedFP:
+        return error(FingerprintMismatch)
 ```
 
 **Fingerprint hybrid extraction:**
@@ -619,7 +622,7 @@ Fingerprints are stored first within each entry for efficient access during veri
 
 Contains per-block metadata in block order. Each block's metadata is variable-length and algorithm-specific:
 
-- **Bijection:** Checkpoints (28B) + Elias-Fano data (a succinct representation for monotonically increasing integer sequences — see §6.5) + Golomb-Rice seed stream (a variable-length encoding efficient for geometrically distributed values — see §6.6) + fallback list
+- **Bijection:** Checkpoints (28B, see §6.7) + Elias-Fano data (a succinct representation for monotonically increasing integer sequences — see §6.5) + Golomb-Rice seed stream (a variable-length encoding efficient for geometrically distributed values — see §6.6) + fallback list
 - **PTRHash:** Pilot bytes (bucketsPerBlock bytes) + remap table
 
 **Empty blocks** (keysInBlock = 0) still have metadata entries:
@@ -665,7 +668,7 @@ The Bijection algorithm combines several well-known MPHF techniques:
 
 - **Per-bucket bijection solving** (brute-force seed search) — a technique used in CHD ([Belazzougui, Botelho & Dietzfelbinger, 2009](https://cmph.sourceforge.net/papers/esa09.pdf)) and RecSplit ([Esposito, Graf & Vigna, 2020](https://epubs.siam.org/doi/pdf/10.1137/1.9781611976007.14))
 - **Elias-Fano encoding** for cumulative bucket sizes and **Golomb-Rice coding** for seeds — standard succinct/compressed encoding techniques, applied to MPHF seed storage by RecSplit
-- **Hierarchical splitting** for large buckets — inspired by RecSplit's recursive splitting
+- **Hierarchical splitting** for large buckets (see §6.4) — inspired by RecSplit's recursive splitting
 
 Where Bijection diverges from RecSplit: it replaces RecSplit's tree-based recursive structure with a flat per-bucket layout plus 128-bucket checkpoints for O(128) query decode. A key design goal of Bijection was **faster build times** — the flat structure with small buckets (lambda=3) enables rapid seed search without RecSplit's expensive recursive splitting, trading space efficiency (~2.46 vs ~1.6–1.7 bits/key for a streaming RecSplit) for significantly faster construction.
 
@@ -811,6 +814,7 @@ function QuerySlotBijection(k0, k1, metadata, keysInBlock) → localSlot:
         seed0, seed1 = decodeSplitSeeds(...)
         h = Mix(k0, k1, seed0, bucketSize, globalSeed)
         splitPoint = bucketSize / 2
+        // seed0 was chosen at build time so that exactly splitPoint keys produce h < splitPoint
         if h < splitPoint:
             localSlot = bucketStart + h
         else:
