@@ -46,7 +46,7 @@ The framework partitions keys into fixed-size groups, routes each key to its gro
 Two algorithms are integrated today:
 
 - **Bijection** — compact metadata encoding, ~2.46 bits/key, lowest RAM usage
-- **PTRHash** — direct pilot lookup, ~2.70 bits/key, fastest queries (~0.05 µs vs ~1.0 µs)
+- **PTRHash** — direct pilot (per-bucket parameter that steers keys to unique slots) lookup, ~2.70 bits/key, fastest queries (~0.05 µs vs ~1.0 µs)
 
 ### 1.3. When to use this
 
@@ -939,6 +939,8 @@ StreamHash's PTRHash adaptation is based on PtrHash by [Groot Koerkamp](https://
 
 PTRHash is normally built as a monolithic O(N)-RAM structure over millions of keys per part. StreamHash adapts it for streaming construction with small, fixed-size blocks (~31,600 keys each), enabling bounded-RAM builds while preserving PTRHash's O(1) query performance.
 
+**Understanding pilots:** In PTRHash, a **pilot** is a small integer (0-255) assigned to each bucket that acts as a "steering parameter." When the algorithm processes a key, it (1) identifies which bucket the key belongs to, (2) retrieves that bucket's pilot value, and (3) combines the key and pilot to compute the final slot position. The pilot value is chosen during construction by trying different values until one is found that maps all keys in the bucket to collision-free slots. You can think of the pilot as guiding its bucket's keys into available positions in the output array, avoiding collisions with keys from other buckets.
+
 The adaptation uses CubicEps bucket distribution (a skewed assignment that creates a few large buckets and many small ones — see §7.2), 8-bit pilots (0-255) with cuckoo hashing (a hash table technique where items can be displaced to alternative positions to resolve collisions) for collision resolution, and a remap table for overflow slots. Queries decode pilots directly (no EF/GR).
 
 **Parameters:**
@@ -1461,7 +1463,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query |
 | Bucket | A partitioning mechanism that divides keys into small groups (averaging ~3 keys) for independent solving. Buckets make MPHF construction tractable by breaking an infeasible problem into many trivial subproblems. |
 | Slot | Position within a block (0 to keysInBlock-1); output of the algorithm for a key |
-| Bucket Seed / Pilot | Per-bucket parameter that makes the hash collision-free within a bucket |
+| Bucket Seed / Pilot | A small integer value assigned to each bucket that determines where its keys map to in the output slots. The algorithm searches through possible pilot values until it finds one that steers all keys in the bucket to collision-free positions. |
 | Global Seed | 64-bit header value that randomizes slot assignment across the entire index |
 | Rank | Final MPHF output (0 to N-1); computed as keysBefore + localSlot |
 | Cumulative Count | Running total of keys; cumulative[i] = number of keys in buckets 0 through i |
