@@ -140,7 +140,7 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 ## 2. Architecture
 
-**Note:** §2.8 traces a complete example through every step described below — you may want to read it alongside these sections.
+**Note:** §2.7 traces a complete example through every step described below — you may want to read it alongside these sections.
 
 **Terminology:** Key terms are defined when first introduced. A complete glossary is in Appendix D.
 
@@ -184,6 +184,27 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 - Looks up block metadata via an in-memory index (see §5.4)
 - Manages file layout, payloads, fingerprints, and parallelism
 
+**How fastRange32 works:** `fastRange32` maps a hash uniformly to [0, n) without modulo bias. The naive `hash % n` introduces non-uniform distribution when n is not a power of two; `fastRange32` avoids this using 128-bit multiplication:
+
+```
+function fastRange32(hash: uint64, n: uint32) → uint32:
+    hi, lo = Mul128(hash, uint64(n))
+    return uint32(hi)
+```
+
+This is monotonic: sorted prefixes map to non-decreasing block indices. This property enables streaming construction — keys can be processed in prefix-sorted order, completing one block at a time.
+
+**How numBlocks is determined:** The framework asks the algorithm for `numBlocks` at construction time. Each algorithm computes this from its own parameters (lambda — the target average number of keys per bucket (3.0 for Bijection, 3.16 for PTRHash), and bucketsPerBlock — the number of buckets per block; see §6 and §7 for algorithm-specific values):
+
+```
+totalBuckets = ceil(N / lambda)
+numBlocks    = max(2, ceil(totalBuckets / bucketsPerBlock))
+```
+
+For example, with Bijection (lambda=3, bucketsPerBlock=1024): 10M keys → ~3.33M buckets → 3,256 blocks of ~3,072 keys each.
+
+Note: Keys in the same block share similar prefix values, but k1 (bytes 8-15) is independent of prefix, and slot computation depends on both k0 and k1 for full 128-bit collision resistance.
+
 **Level 2: Algorithm (slot computation)** — Within the selected block, the algorithm:
 - Receives `k0 = LittleEndian.Uint64(key[0:8])` and `k1 = LittleEndian.Uint64(key[8:16])`
 - Assigns keys to local positions using **buckets** — small groups averaging ~3 keys
@@ -203,38 +224,7 @@ This gives each key a globally unique rank in [0, N).
 - Algorithms only see bounded subsets of keys (a single block at a time)
 - Query locality is guaranteed by the framework's file layout
 
-### 2.3. Block Routing
-
-The framework routes keys to blocks using `fastRange32`:
-
-```
-prefix   = BigEndian.Uint64(key[0:8])
-blockIdx = fastRange32(prefix, numBlocks)
-```
-
-`fastRange32` maps a hash uniformly to [0, n) without modulo bias. The naive `hash % n` introduces non-uniform distribution when n is not a power of two; `fastRange32` avoids this using 128-bit multiplication:
-
-```
-function fastRange32(hash: uint64, n: uint32) → uint32:
-    hi, lo = Mul128(hash, uint64(n))
-    return uint32(hi)
-```
-
-This is monotonic: sorted prefixes map to non-decreasing block indices. This property enables streaming construction — keys can be processed in prefix-sorted order, completing one block at a time.
-
-The framework asks the algorithm for `numBlocks` at construction time. Each algorithm computes this from its own parameters (lambda — the target average number of keys per bucket (3.0 for Bijection, 3.16 for PTRHash), and bucketsPerBlock — the number of buckets per block; see §6 and §7 for algorithm-specific values):
-
-```
-totalBuckets = ceil(N / lambda)
-numBlocks    = max(2, ceil(totalBuckets / bucketsPerBlock))
-```
-
-For example, with Bijection (lambda=3, bucketsPerBlock=1024): 10M keys → ~3.33M buckets → 3,256 blocks of ~3,072 keys each.
-
-Note: Keys in the same block share similar prefix values, but k1 (bytes 8-15) is
-independent of prefix, and slot computation depends on both k0 and k1 for full 128-bit collision resistance.
-
-### 2.4. Data Flow Overview
+### 2.3. Data Flow Overview
 
 ```
                     +----------------------------------------+
@@ -263,7 +253,7 @@ independent of prefix, and slot computation depends on both k0 and k1 for full 1
                     globalRank = keysBefore + localSlot
 ```
 
-### 2.5. Query Pseudocode (Framework Level)
+### 2.4. Query Pseudocode (Framework Level)
 
 This shows how the two-level dispatch works. The core query path computes the rank; optional fingerprint verification (when configured) can detect non-member keys.
 
@@ -321,7 +311,7 @@ function extractFingerprintHybrid(key, k0, k1) → uint32:
 
 `packBytes` interprets the given byte slice as a little-endian unsigned integer, zero-extended to uint32. For example, `packBytes([0xAB, 0xCD])` returns `0x0000CDAB`.
 
-### 2.6. Query Locality
+### 2.5. Query Locality
 
 **Framework locality advantage:** StreamHash stores all metadata for a group of keys contiguously on disk. For example, the Bijection algorithm's metadata per block is typically ~1 KB, fitting within a single 4 KB page. This means computing the MPHF rank requires reading one contiguous region — a single page fault in the common case.
 
@@ -331,7 +321,7 @@ function extractFingerprintHybrid(key, k0, k1) → uint32:
 
 **Payload mode:** When payloads or fingerprints are configured, queries always require two reads (metadata region + payload region) since these are at different file offsets.
 
-### 2.7. Build Parallelism
+### 2.6. Build Parallelism
 
 Monolithic MPHF algorithms must solve the entire key space as a single unit — the hash function for key N depends on decisions made for keys 1 through N-1, preventing meaningful parallelization of construction.
 
@@ -341,7 +331,7 @@ The pipeline is not embarrassingly parallel — the coordinator serializes file 
 
 Queries are also naturally parallel and lock-free: the index is immutable after construction, and each query reads an independent block. No synchronization is needed between concurrent queries.
 
-### 2.8. Worked Example
+### 2.7. Worked Example
 
 Tracing a single key through the entire system (Bijection algorithm, 10M keys). This example references Bijection-specific concepts (Elias-Fano, Golomb-Rice, buckets with lambda=3) defined in §6 — skip ahead to §6 first if the details are unfamiliar, or read this at a high level to see how the framework and algorithm layers interact:
 
