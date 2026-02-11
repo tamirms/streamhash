@@ -144,7 +144,22 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 **Terminology:** Key terms are defined when first introduced. A complete glossary is in Appendix D.
 
-### 2.1. Core Concepts
+### 2.1. Key Terminology
+
+| Term | Definition |
+|------|------------|
+| `prefix` | First 8 bytes of a key interpreted as **big-endian** uint64. Used only by the **framework** for monotonic block routing. Big-endian preserves the sort order of raw key bytes, which is what makes block routing monotonic. |
+| `k0` | The same first 8 bytes interpreted as **little-endian** uint64 (= `ReverseBytes64(prefix)`). Used by **algorithms** for slot/bucket computation. Little-endian is the native integer format on most CPUs, avoiding byte-swap overhead in hash arithmetic. |
+| `k1` | Bytes 8-15 of a key as **little-endian** uint64. Used by **algorithms** for slot/bucket computation. Completely independent of `prefix` — different bytes of the key. |
+| Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query. |
+| Bucket | A partitioning mechanism used by MPHF algorithms to divide keys into small groups (averaging ~3 keys) that can each be solved independently. Constructing a perfect hash for all keys at once would be computationally infeasible; buckets make the problem tractable by breaking it into many trivial subproblems. Keys are assigned to buckets based on their hash values, and the algorithm searches for a seed/pilot for each bucket that produces collision-free slot assignments. |
+| Slot | Position within a block (0 to keysInBlock-1). Output of the algorithm for a specific key. |
+| Rank | Final MPHF output (0 to N-1). Computed as `keysBefore + localSlot`. |
+| `numBlocks` | Total blocks in the index. Determined by the algorithm based on its own parameters. |
+
+Note: `prefix` and `k0` are two different integer interpretations of the **same 8 bytes** (bytes 0-7 of the key). The framework needs big-endian (`prefix`) so that sorted key bytes produce sorted integers for monotonic block routing. The algorithm needs little-endian (`k0`) because it's the native CPU format for arithmetic. They contain the same information — `prefix = ReverseBytes64(k0)` — but serve different purposes at different layers.
+
+### 2.2. Core Concepts
 
 Before diving into the two-level dispatch model, it's helpful to understand why StreamHash is designed this way and what the key abstractions mean.
 
@@ -171,7 +186,7 @@ This gives each key a globally unique rank in [0, N).
 - Algorithms only see bounded subsets of keys (a single block at a time)
 - Query locality is guaranteed by the framework's file layout
 
-### 2.2. Two-Level Dispatch
+### 2.3. Two-Level Dispatch
 
 StreamHash partitions keys into fixed-size groups called *blocks*, each containing a few thousand keys. It uses a **two-level dispatch** model separating framework concerns from algorithm-specific logic:
 
@@ -189,21 +204,6 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 - Receives `k0 = LittleEndian.Uint64(key[0:8])` and `k1 = LittleEndian.Uint64(key[8:16])`
 - Computes the local slot index within the block using algorithm-specific metadata
 - Each algorithm has its own bucket organization, seed search, and encoding
-
-### 2.3. Key Terminology
-
-| Term | Definition |
-|------|------------|
-| `prefix` | First 8 bytes of a key interpreted as **big-endian** uint64. Used only by the **framework** for monotonic block routing. Big-endian preserves the sort order of raw key bytes, which is what makes block routing monotonic. |
-| `k0` | The same first 8 bytes interpreted as **little-endian** uint64 (= `ReverseBytes64(prefix)`). Used by **algorithms** for slot/bucket computation. Little-endian is the native integer format on most CPUs, avoiding byte-swap overhead in hash arithmetic. |
-| `k1` | Bytes 8-15 of a key as **little-endian** uint64. Used by **algorithms** for slot/bucket computation. Completely independent of `prefix` — different bytes of the key. |
-| Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query. |
-| Bucket | A partitioning mechanism used by MPHF algorithms to divide keys into small groups (averaging ~3 keys) that can each be solved independently. Constructing a perfect hash for all keys at once would be computationally infeasible; buckets make the problem tractable by breaking it into many trivial subproblems. Keys are assigned to buckets based on their hash values, and the algorithm searches for a seed/pilot for each bucket that produces collision-free slot assignments. |
-| Slot | Position within a block (0 to keysInBlock-1). Output of the algorithm for a specific key. |
-| Rank | Final MPHF output (0 to N-1). Computed as `keysBefore + localSlot`. |
-| `numBlocks` | Total blocks in the index. Determined by the algorithm based on its own parameters. |
-
-Note: `prefix` and `k0` are two different integer interpretations of the **same 8 bytes** (bytes 0-7 of the key). The framework needs big-endian (`prefix`) so that sorted key bytes produce sorted integers for monotonic block routing. The algorithm needs little-endian (`k0`) because it's the native CPU format for arithmetic. They contain the same information — `prefix = ReverseBytes64(k0)` — but serve different purposes at different layers.
 
 ### 2.4. Block Routing
 
@@ -1269,7 +1269,7 @@ Keys must be at least 16 bytes. StreamHash uses the first 16 bytes as k0 and k1.
 | 1 billion | ~1.5×10⁻²¹ (≈0) |
 | 100 billion | ~1.5×10⁻¹⁷ (≈0) |
 
-For structured (non-random) input, keys **must** be pre-hashed with a 128-bit hash (see Appendix A). See §2.3 for the definitions of k0, k1, and prefix.
+For structured (non-random) input, keys **must** be pre-hashed with a 128-bit hash (see Appendix A). See §2.1 for the definitions of k0, k1, and prefix.
 
 #### 8.2.2. Payload Modes
 
@@ -1455,9 +1455,9 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 |------|------------|
 | MPHF | Minimal Perfect Hash Function — bijection from N keys to [0, N) |
 | Bijection | One-to-one mapping with no collisions |
-| prefix | First 8 bytes of a key, interpreted as **big-endian** uint64, used for block routing (see §2.3) |
-| k0 | First 8 bytes of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.3) |
-| k1 | Bytes 8-15 of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.3) |
+| prefix | First 8 bytes of a key, interpreted as **big-endian** uint64, used for block routing (see §2.1) |
+| k0 | First 8 bytes of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.1) |
+| k1 | Bytes 8-15 of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.1) |
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query |
 | Bucket | A partitioning mechanism that divides keys into small groups (averaging ~3 keys) for independent solving. Buckets make MPHF construction tractable by breaking an infeasible problem into many trivial subproblems. |
 | Slot | Position within a block (0 to keysInBlock-1); output of the algorithm for a key |
