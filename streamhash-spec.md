@@ -40,9 +40,11 @@ Starting with the query path lets you verify correctness incrementally: build a 
 
 ## 1. Overview
 
-### 1.1. What This Is
+### 1.1. What is an MPHF
 
 A **Minimal Perfect Hash Function (MPHF)** maps N keys to N consecutive integers [0, N) with no collisions and no wasted slots. This lets you build compact, read-only lookup tables where every key has a unique position — enabling O(1) lookups without storing the keys themselves.
+
+### 1.2. What is StreamHash
 
 StreamHash is an **algorithm-agnostic framework** for streaming MPHF construction. It can take almost any perfect hashing algorithm and, with some adaptation, give it:
 
@@ -57,9 +59,7 @@ Two algorithms are integrated today:
 - **Bijection** — compact metadata encoding, ~2.46 bits/key, lowest RAM usage
 - **PTRHash** — direct pilot lookup, ~2.70 bits/key, fastest queries (~0.05 µs vs ~1.0 µs)
 
-Others can be added. For example, RecSplit could be adapted to achieve close to ~1.56 bits/key with the same bounded-RAM streaming construction — the algorithm only needs a build-time solver and a query-time decoder (see §4). (The standalone RecSplit figure is ~1.56 bits/key; framework overhead from the per-block index and fixed costs would add a small amount, likely ~1.6–1.7 bits/key in practice.)
-
-**Key constraint for plugged-in algorithms:** Because the framework routes keys by their prefix, keys in the same group share similar prefix values. Algorithms must either be insensitive to this correlation (as both current algorithms are) or internally re-hash the key material to remove it. See §4.5 for details.
+### 1.3. When to use this
 
 When configured with a payload size (1–8 bytes, fixed), the structure functions as a **static perfect hash map**, returning small fixed-size payloads directly instead of ranks. This is suitable for storing offsets, compact identifiers, or small fixed-width values. For larger or variable-length values, use MPHF mode and store the rank as an offset into an external data file.
 
@@ -82,7 +82,7 @@ Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommend
       See §8.2.1 for collision probability analysis.
 ```
 
-### 1.2. Design Goals
+### 1.4. Design Goals
 
 1. **Extensibility** — The framework is algorithm-agnostic; new MPHF algorithms (including streaming RecSplit) can be added by providing a build-time solver and a query-time decoder (see §4)
 2. **Single-region queries** — Every lookup reads metadata from one contiguous region. MPHF mode requires one disk read; payload mode requires two reads (metadata region + payload region at different file offsets)
@@ -93,7 +93,7 @@ Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommend
 5. **Fast construction** — Linear time, I/O-bound at NVMe speeds
 6. **Simplicity** — Straightforward implementation with standard building blocks
 
-### 1.3. Constraints
+### 1.5. Constraints
 
 - **Input must be uniformly random** — Keys must be pre-hashed if not already random. The implementation does not perform internal pre-hashing; callers must hash non-uniform input before indexing.
 - **Static only** — No insertions or deletions after construction
@@ -104,7 +104,7 @@ Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommend
 - **Maximum key length** — Keys must be ≤ 65,535 bytes. This limit comes from the uint16 key-length field in the unsorted-mode temp file format. In practice, keys are typically 16–64 bytes (hash outputs); this limit exists only as a safety check.
 - **Fixed-size payloads only** — All payloads must be exactly `PayloadSize` bytes. Variable-length values require padding or external storage with offsets.
 
-### 1.4. Performance Summary
+### 1.6. Performance Summary
 
 Reference measurements on Apple M1 Max (100M keys, MPHF mode, pre-sorted input, single-file output):
 
@@ -129,7 +129,7 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 *Scale is limited by 40-bit index fields (~1.1 trillion keys max). See §8.2.3 for detailed limits.*
 
-### 1.5. Choosing an Algorithm
+### 1.7. Choosing an Algorithm
 
 | | Bijection | PTRHash |
 |---|---|---|
@@ -463,7 +463,9 @@ Any MPHF algorithm can be plugged into the framework, provided it satisfies thes
 
 **Within-block key correlations:** Because the framework routes keys by `prefix = BigEndian.Uint64(key[0:8])`, keys in the same block share similar prefix values, which means byte 0 of the key is approximately fixed within a block. In little-endian, this constrains only the *least* significant byte of k0 — the high bytes remain effectively random. Meanwhile, k1 (bytes 8-15) is completely independent of the routing prefix. In practice, neither current algorithm is affected: Bijection uses `fastRange32(k0, ...)` which is dominated by high bits, and PTRHash uses k1 for bucket assignment. However, algorithm implementors should be aware of this property — if needed, the algorithm can internally re-hash (k0, k1) to produce fully independent values.
 
-**Prefix routing requires uniform input.** Block assignment depends on the key prefix distribution. If keys are highly non-uniform (e.g., all keys share a common prefix), blocks will be severely imbalanced — in the worst case collapsing to a single block. This is why §1.3 requires pre-hashing for non-random input: pre-hashing with a 128-bit hash (see Appendix A) ensures the prefix is uniformly distributed, which in turn ensures balanced block assignment.
+**Prefix routing requires uniform input.** Block assignment depends on the key prefix distribution. If keys are highly non-uniform (e.g., all keys share a common prefix), blocks will be severely imbalanced — in the worst case collapsing to a single block. This is why §1.5 requires pre-hashing for non-random input: pre-hashing with a 128-bit hash (see Appendix A) ensures the prefix is uniformly distributed, which in turn ensures balanced block assignment.
+
+**Framework extensibility:** Other algorithms can be added beyond Bijection and PTRHash. For example, RecSplit could be adapted to achieve close to ~1.56 bits/key with the same bounded-RAM streaming construction — the algorithm only needs a build-time solver and a query-time decoder (see §4.1 and §4.2). (The standalone RecSplit figure is ~1.56 bits/key; framework overhead from the per-block index and fixed costs would add a small amount, likely ~1.6–1.7 bits/key in practice.)
 
 ### 4.6. Adding a New Algorithm
 
