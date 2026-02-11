@@ -140,7 +140,7 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 ## 2. Architecture
 
-**Note:** §2.9 traces a complete example through every step described below — you may want to read it alongside these sections.
+**Note:** §2.8 traces a complete example through every step described below — you may want to read it alongside these sections.
 
 **Terminology:** Key terms are defined when first introduced. A complete glossary is in Appendix D.
 
@@ -159,9 +159,9 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 Note: `prefix` and `k0` are two different integer interpretations of the **same 8 bytes** (bytes 0-7 of the key). The framework needs big-endian (`prefix`) so that sorted key bytes produce sorted integers for monotonic block routing. The algorithm needs little-endian (`k0`) because it's the native CPU format for arithmetic. They contain the same information — `prefix = ReverseBytes64(k0)` — but serve different purposes at different layers.
 
-### 2.2. Core Concepts
+### 2.2. Core Concepts & Two-Level Dispatch
 
-Before diving into the two-level dispatch model, it's helpful to understand why StreamHash is designed this way and what the key abstractions mean.
+Before diving into implementation details, it's helpful to understand why StreamHash is designed this way and what the key abstractions mean.
 
 **What an MPHF does:** A Minimal Perfect Hash Function maps N keys to exactly N consecutive slots [0, N) with no collisions. Given a key, it returns a unique rank that can be used to index into an array or file.
 
@@ -172,7 +172,24 @@ Before diving into the two-level dispatch model, it's helpful to understand why 
 - Stored contiguously on disk (enabling single-read queries)
 - Small enough to fit metadata in one page (~1 KB for Bijection)
 
-**Within each block:** The algorithm assigns keys to local positions. Both current algorithms (Bijection and PTRHash) use the concept of **buckets** — small groups averaging ~3 keys — and search for a **seed** (also called a **pilot**) for each bucket that makes the hash collision-free. Each key is assigned a unique **slot** (position within the block, 0 to keysInBlock-1).
+**Two-level dispatch model:** StreamHash uses a **two-level dispatch** architecture that separates framework concerns from algorithm-specific logic:
+
+```
+Query(key) → Framework routes key to block → Algorithm computes slot within block
+```
+
+**Level 1: Framework (block routing)** — The framework handles:
+- Extracts `prefix = BigEndian.Uint64(key[0:8])` for routing
+- Computes `blockIdx = fastRange32(prefix, numBlocks)` to select a block
+- Looks up block metadata via an in-memory index (see §5.4)
+- Manages file layout, payloads, fingerprints, and parallelism
+
+**Level 2: Algorithm (slot computation)** — Within the selected block, the algorithm:
+- Receives `k0 = LittleEndian.Uint64(key[0:8])` and `k1 = LittleEndian.Uint64(key[8:16])`
+- Assigns keys to local positions using **buckets** — small groups averaging ~3 keys
+- Searches for a **seed** (also called a **pilot**) for each bucket that makes the hash collision-free
+- Computes the local **slot** index (position 0 to keysInBlock-1) for the key
+- Each algorithm has its own bucket organization, seed search, and metadata encoding
 
 **Computing the final rank:** The framework tracks how many keys came before each block. The final MPHF output for a key is:
 ```
@@ -181,31 +198,12 @@ rank = keysBefore + localSlot
 
 This gives each key a globally unique rank in [0, N).
 
-**Why two levels?** The **framework** handles block routing (using the key prefix), file layout, and parallelism. The **algorithm** handles bucket organization and slot computation within each block. This separation means:
+**Why this separation?** The two-level architecture means:
 - New algorithms can be plugged in without changing the framework
 - Algorithms only see bounded subsets of keys (a single block at a time)
 - Query locality is guaranteed by the framework's file layout
 
-### 2.3. Two-Level Dispatch
-
-StreamHash partitions keys into fixed-size groups called *blocks*, each containing a few thousand keys. It uses a **two-level dispatch** model separating framework concerns from algorithm-specific logic:
-
-```
-Query(key) → Framework routes key to block → Algorithm computes slot within block
-```
-
-**Level 1: Framework (block routing)**
-- Extracts `prefix = BigEndian.Uint64(key[0:8])` for routing
-- Computes `blockIdx = fastRange32(prefix, numBlocks)` to select a block
-- Looks up block metadata via an in-memory index (see §5.4)
-- Manages file layout, payloads, fingerprints, and parallelism
-
-**Level 2: Algorithm (slot computation)**
-- Receives `k0 = LittleEndian.Uint64(key[0:8])` and `k1 = LittleEndian.Uint64(key[8:16])`
-- Computes the local slot index within the block using algorithm-specific metadata
-- Each algorithm has its own bucket organization, seed search, and encoding
-
-### 2.4. Block Routing
+### 2.3. Block Routing
 
 The framework routes keys to blocks using `fastRange32`:
 
@@ -236,7 +234,7 @@ For example, with Bijection (lambda=3, bucketsPerBlock=1024): 10M keys → ~3.33
 Note: Keys in the same block share similar prefix values, but k1 (bytes 8-15) is
 independent of prefix, and slot computation depends on both k0 and k1 for full 128-bit collision resistance.
 
-### 2.5. Data Flow Overview
+### 2.4. Data Flow Overview
 
 ```
                     +----------------------------------------+
@@ -265,7 +263,7 @@ independent of prefix, and slot computation depends on both k0 and k1 for full 1
                     globalRank = keysBefore + localSlot
 ```
 
-### 2.6. Query Pseudocode (Framework Level)
+### 2.5. Query Pseudocode (Framework Level)
 
 This shows how the two-level dispatch works. The core query path computes the rank; optional fingerprint verification (when configured) can detect non-member keys.
 
@@ -323,7 +321,7 @@ function extractFingerprintHybrid(key, k0, k1) → uint32:
 
 `packBytes` interprets the given byte slice as a little-endian unsigned integer, zero-extended to uint32. For example, `packBytes([0xAB, 0xCD])` returns `0x0000CDAB`.
 
-### 2.7. Query Locality
+### 2.6. Query Locality
 
 **Framework locality advantage:** StreamHash stores all metadata for a group of keys contiguously on disk. For example, the Bijection algorithm's metadata per block is typically ~1 KB, fitting within a single 4 KB page. This means computing the MPHF rank requires reading one contiguous region — a single page fault in the common case.
 
@@ -333,7 +331,7 @@ function extractFingerprintHybrid(key, k0, k1) → uint32:
 
 **Payload mode:** When payloads or fingerprints are configured, queries always require two reads (metadata region + payload region) since these are at different file offsets.
 
-### 2.8. Build Parallelism
+### 2.7. Build Parallelism
 
 Monolithic MPHF algorithms must solve the entire key space as a single unit — the hash function for key N depends on decisions made for keys 1 through N-1, preventing meaningful parallelization of construction.
 
@@ -343,7 +341,7 @@ The pipeline is not embarrassingly parallel — the coordinator serializes file 
 
 Queries are also naturally parallel and lock-free: the index is immutable after construction, and each query reads an independent block. No synchronization is needed between concurrent queries.
 
-### 2.9. Worked Example
+### 2.8. Worked Example
 
 Tracing a single key through the entire system (Bijection algorithm, 10M keys). This example references Bijection-specific concepts (Elias-Fano, Golomb-Rice, buckets with lambda=3) defined in §6 — skip ahead to §6 first if the details are unfamiliar, or read this at a high level to see how the framework and algorithm layers interact:
 
