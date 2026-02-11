@@ -1116,7 +1116,15 @@ Keys arrive in non-decreasing prefix order. The framework routes each key to its
 
 #### 8.1.2. Unsorted Mode
 
-For unsorted input, the framework uses a **two-pass construction** process:
+For unsorted input, the framework uses a **two-pass construction** process with temporary file-based routing.
+
+**Overflow margin:** To handle uneven key distribution, each block region is allocated with a dynamic 7σ Poisson margin:
+```
+avgKeysPerBlock = N / numBlocks
+σ = sqrt(avgKeysPerBlock)
+regionCapacity = ceil(avgKeysPerBlock × (1 + 7 / sqrt(avgKeysPerBlock)))
+```
+This provides ~10⁻¹² overflow probability per block (Gaussian tail Q(7) ≈ 1.28×10⁻¹²). The margin adapts to block size: small blocks (1K keys) get ~+22%, large blocks (1M keys) get ~+0.7%.
 
 **Pass 1: Routing to temp file**
 - Each key is routed to its block using `blockIdx = fastRange32(prefix, numBlocks)`
@@ -1150,18 +1158,9 @@ The `uint16_le` key-length field limits keys to ≤ 65,535 bytes (see §1.5). In
 
 **Overflow handling:**
 - If a block's region fills up (cursor reaches `regionCapacity`), the builder returns `ErrRegionOverflow`
-- The 7σ Poisson margin (see below) makes this extremely unlikely (~10⁻¹² per block)
+- The 7σ Poisson margin (described above) makes this extremely unlikely (~10⁻¹² per block)
 
-**Temp file sizing:** Uses a dynamic 7σ Poisson margin instead of a fixed percentage:
-```
-avgKeysPerBlock = N / numBlocks
-σ = sqrt(avgKeysPerBlock)
-regionCapacity = ceil(avgKeysPerBlock × (1 + 7 / sqrt(avgKeysPerBlock)))
-regionSize = regionCapacity × entrySize
-tempFileSize = numBlocks × regionSize
-```
-
-The 7σ margin provides ~10⁻¹² overflow probability per block (Gaussian tail Q(7) ≈ 1.28×10⁻¹²). The temp file is deleted after construction.
+The temp file is deleted after construction.
 
 #### 8.1.3. Parallel Mode
 
