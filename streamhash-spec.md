@@ -71,6 +71,10 @@ Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommend
       See §8.2.1 for collision probability analysis.
 ```
 
+**When StreamHash is not a good fit:**
+- Fewer than ~100K keys — the block overhead dominates; use a simple hash table or a monolithic MPHF
+- Dynamic dataset — StreamHash is static; use a hash table or cuckoo filter instead
+
 ### 1.4. Design Goals
 
 1. **Extensibility** — The framework is algorithm-agnostic; new MPHF algorithms (including streaming RecSplit) can be added by providing a build-time solver and a query-time decoder (see §4)
@@ -404,10 +408,6 @@ The table below compares StreamHash against alternative MPHF constructions. "O(N
 | Bloom Filter | ~10 | O(N) | k reads | Yes (probabilistic) | Different purpose |
 
 StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming RecSplit for faster build times. The framework itself is algorithm-agnostic — a streaming RecSplit implementation could be plugged in to achieve similar bits/key with the same bounded-RAM construction (see §4.5).
-
-**When StreamHash is not a good fit:**
-- Fewer than ~100K keys — the block overhead dominates; use a simple hash table or a monolithic MPHF
-- Dynamic dataset — StreamHash is static; use a hash table or cuckoo filter instead
 
 ---
 
