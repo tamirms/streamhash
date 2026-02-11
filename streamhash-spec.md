@@ -156,8 +156,6 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 ## 2. Architecture
 
-**Note:** §2.7 traces a complete example through every step described below — you may want to read it alongside these sections.
-
 **Terminology:** Key terms are defined when first introduced. A complete glossary is in Appendix D.
 
 ### 2.1. Key Terminology
@@ -346,56 +344,6 @@ StreamHash's block model eliminates this dependency. Each block's MPHF is solved
 The pipeline is not embarrassingly parallel — the coordinator serializes file writes — but the serialized output step (writing metadata bytes and folding hashes) is fast relative to MPHF solving (the CPU-bound step). As a result, throughput scales near-linearly with worker count: 4 workers achieve ~3–4× single-threaded throughput (see §1.6).
 
 Queries are also naturally parallel and lock-free: the index is immutable after construction, and each query reads an independent block. No synchronization is needed between concurrent queries.
-
-### 2.7. Worked Example
-
-Tracing a single key through the entire system (Bijection algorithm, 10M keys). This example references Bijection-specific concepts (Elias-Fano, Golomb-Rice, buckets with lambda=3) defined in §6 — skip ahead to §6 first if the details are unfamiliar, or read this at a high level to see how the framework and algorithm layers interact:
-
-```
-Key (32 bytes, hex): 7A 3F B8 01 CC 55 D2 E9  4B 11 8A F7 63 20 DE A4  ...
-
-Step 1: Parse key
-  prefix = BigEndian.Uint64(key[0:8])  = 0x7A3FB801CC55D2E9
-  k0     = LittleEndian.Uint64(key[0:8])  = 0xE9D255CC01B83F7A
-  k1     = LittleEndian.Uint64(key[8:16]) = 0xA4DE2063F78A114B
-
-Step 2: Block routing (numBlocks = 3,256 for 10M keys with Bijection)
-  blockIdx = fastRange32(0x7A3FB801CC55D2E9, 3256)
-           = uint32(Hi64(0x7A3FB801CC55D2E9 × 3256))
-           = 1554
-
-Step 3: Block index lookup (§4.4)
-  entry     = ramIndex[1554]  →  KeysBefore=4773000, MetadataOffset=1545912
-  nextEntry = ramIndex[1555]  →  KeysBefore=4776003, MetadataOffset=...
-  keysInBlock = 4776003 - 4773000 = 3003
-
-Step 4: Read metadata (one contiguous region, ~920 bytes for this block)
-  metadataData = metadataRegion[1545912 : ...]
-
-Step 5: Bijection slot computation
-  localBucket = fastRange32(k0, 1024) = fastRange32(0xE9D255CC01B83F7A, 1024)
-              = 935
-
-  Decode Elias-Fano → cumulative[934] = 2827, cumulative[935] = 2830
-  bucketStart = 2827, bucketSize = 3
-
-  Decode Golomb-Rice seed for bucket 935 → seed = 5
-
-  slot = Mix(k0, k1, seed=5, bucketSize=3, globalSeed)
-       = fastRange32(wymix(k0 ^ globalSeed ^ 5, k1 ^ globalSeed), 3)
-       = 1
-
-  localSlot = bucketStart + slot = 2827 + 1 = 2828
-
-Step 6: Global rank
-  globalRank = keysBefore + localSlot = 4773000 + 2828 = 4775828
-
-Step 7: Payload lookup (if configured)
-  payloadOffset = payloadRegionOffset + 4775828 × entrySize
-  → read payload from this offset (second disk read)
-```
-
----
 
 ## 3. Framework / Algorithm Contract
 
