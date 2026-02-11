@@ -22,7 +22,7 @@
 - **Quick understanding:** Read §1 (Overview) and §2 (Architecture) — §1.1 explains what an MPHF is, §1.2 describes the framework, and §2 walks through the end-to-end query flow
 - **Should I use this?:** Read §3 (Comparison) for trade-offs vs alternatives, §1.7 for algorithm selection guidance
 - **Framework extensibility:** Read §1.2 and §4 (Algorithm Contract) for how to plug in new algorithms
-- **Implementation:** See §8.0 for a recommended implementation roadmap. The Glossary (Appendix D) defines all technical terms.
+- **Implementation:** See §7.0 for a recommended implementation roadmap. The Glossary (Appendix D) defines all technical terms.
 - **Reference:** §5 (File Format), §6 (Bijection), and §7 (PTRHash) are the normative specification
 
 ---
@@ -68,16 +68,32 @@ Output: Compact index that answers:
         "what is the payload for key K?" in two disk reads (payload mode)
 
 Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommended.
-      See §8.2.1 for collision probability analysis.
+      See §6.2.1 for collision probability analysis.
 ```
 
 **When StreamHash is not a good fit:**
 - Fewer than ~100K keys — the block overhead dominates; use a simple hash table or a monolithic MPHF
 - Dynamic dataset — StreamHash is static; use a hash table or cuckoo filter instead
 
-### 1.4. Design Goals
+### 1.4. Comparison with Alternatives
 
-1. **Extensibility** — The framework is algorithm-agnostic; new MPHF algorithms (including streaming RecSplit) can be added by providing a build-time solver and a query-time decoder (see §4)
+The table below compares StreamHash against alternative MPHF constructions. "O(N) build RAM" means memory proportional to dataset size — for a 10-billion-key dataset, this could mean tens to hundreds of GB. StreamHash's fixed ~1–75 MB is independent of dataset size.
+
+| System | Bits/Key | Build RAM | Query I/O | Membership | Notes |
+|--------|----------|-----------|-----------|------------|-------|
+| **StreamHash (Bijection)** | ~2.46 | ~1-75 MB | 1 read (MPHF) or 2 reads (payload) | Optional (probabilistic, via fingerprint) | Fixed RAM regardless of dataset size |
+| **StreamHash (PTRHash)** | ~2.70 | ~1-75 MB | 1 read (MPHF) or 2 reads (payload) | Optional (probabilistic, via fingerprint) | Fixed RAM, fastest queries |
+| RecSplit | ~1.56 | O(N) | Multiple reads | No | Best compression, slow construction, higher RAM |
+| PTRHash (Rust) | ~2.1–3.0 | O(N) | 1 disk read | No | Multiple modes: fast (~3.0), balanced (~2.4), compact (~2.1) |
+| CHD / CMPH | ~2.07 | O(N) | Multiple reads | No | Classic approach |
+| Cuckoo Filter | ~8-12 | O(N) | 1-2 reads | Yes (probabilistic) | Different purpose |
+| Bloom Filter | ~10 | O(N) | k reads | Yes (probabilistic) | Different purpose |
+
+StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming RecSplit for faster build times. The framework itself is algorithm-agnostic — a streaming RecSplit implementation could be plugged in to achieve similar bits/key with the same bounded-RAM construction (see §3.5).
+
+### 1.5. Design Goals
+
+1. **Extensibility** — The framework is algorithm-agnostic; new MPHF algorithms (including streaming RecSplit) can be added by providing a build-time solver and a query-time decoder (see §3)
 2. **Single-region queries** — Every lookup reads metadata from one contiguous region. MPHF mode requires one disk read; payload mode requires two reads (metadata region + payload region at different file offsets)
 3. **Streaming construction** — Build with minimal userspace RAM:
    - **~1–75 MB** regardless of dataset size (routing buffers + hash array + block queue)
@@ -86,7 +102,7 @@ Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommend
 5. **Fast construction** — Linear time, I/O-bound at NVMe speeds
 6. **Simplicity** — Straightforward implementation with standard building blocks
 
-### 1.5. Constraints
+### 1.6. Constraints
 
 - **Input must be uniformly random** — Keys must be pre-hashed if not already random. The implementation does not perform internal pre-hashing; callers must hash non-uniform input before indexing.
 - **Static only** — No insertions or deletions after construction
@@ -97,7 +113,7 @@ Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommend
 - **Maximum key length** — Keys must be ≤ 65,535 bytes. This limit comes from the uint16 key-length field in the unsorted-mode temp file format. In practice, keys are typically 16–64 bytes (hash outputs); this limit exists only as a safety check.
 - **Fixed-size payloads only** — All payloads must be exactly `PayloadSize` bytes. Variable-length values require padding or external storage with offsets.
 
-### 1.6. Performance Summary
+### 1.7. Performance Summary
 
 Reference measurements on Apple M1 Max (100M keys, MPHF mode, pre-sorted input, single-file output):
 
@@ -120,9 +136,9 @@ Reference measurements on Apple M1 Max (100M keys, MPHF mode, pre-sorted input, 
 
 Query latency excludes disk I/O. MPHF mode requires one metadata read per query; payload mode requires a second read from the payload region. On NVMe, each read is typically ~100 µs.
 
-*Scale is limited by 40-bit index fields (~1.1 trillion keys max). See §8.2.3 for detailed limits.*
+*Scale is limited by 40-bit index fields (~1.1 trillion keys max). See §6.2.3 for detailed limits.*
 
-### 1.7. Choosing an Algorithm
+### 1.8. Choosing an Algorithm
 
 | | Bijection | PTRHash |
 |---|---|---|
@@ -181,7 +197,7 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 **Level 1: Framework (block routing)** — The framework handles:
 - Extracts `prefix = BigEndian.Uint64(key[0:8])` for routing
 - Computes `blockIdx = fastRange32(prefix, numBlocks)` to select a block
-- Looks up block metadata via an in-memory index (see §5.4)
+- Looks up block metadata via an in-memory index (see §4.4)
 - Manages file layout, payloads, fingerprints, and parallelism
 
 **How fastRange32 works:** `fastRange32` maps a hash uniformly to [0, n) without modulo bias. The naive `hash % n` introduces non-uniform distribution when n is not a power of two; `fastRange32` avoids this using 128-bit multiplication:
@@ -268,7 +284,7 @@ function Query(key) → (globalRank, error):
     // Framework: route to block
     blockIdx = fastRange32(prefix, numBlocks)
 
-    // Framework: block index lookup (§5.4)
+    // Framework: block index lookup (§4.4)
     entry     = ramIndex[blockIdx]
     nextEntry = ramIndex[blockIdx + 1]
     keysBefore  = entry.KeysBefore
@@ -348,7 +364,7 @@ Step 2: Block routing (numBlocks = 3,256 for 10M keys with Bijection)
            = uint32(Hi64(0x7A3FB801CC55D2E9 × 3256))
            = 1554
 
-Step 3: Block index lookup (§5.4)
+Step 3: Block index lookup (§4.4)
   entry     = ramIndex[1554]  →  KeysBefore=4773000, MetadataOffset=1545912
   nextEntry = ramIndex[1555]  →  KeysBefore=4776003, MetadataOffset=...
   keysInBlock = 4776003 - 4773000 = 3003
@@ -381,32 +397,14 @@ Step 7: Payload lookup (if configured)
 
 ---
 
-## 3. Comparison with Alternatives
-
-The table below compares StreamHash against alternative MPHF constructions. "O(N) build RAM" means memory proportional to dataset size — for a 10-billion-key dataset, this could mean tens to hundreds of GB. StreamHash's fixed ~1–75 MB is independent of dataset size.
-
-| System | Bits/Key | Build RAM | Query I/O | Membership | Notes |
-|--------|----------|-----------|-----------|------------|-------|
-| **StreamHash (Bijection)** | ~2.46 | ~1-75 MB | 1 read (MPHF) or 2 reads (payload) | Optional (probabilistic, via fingerprint) | Fixed RAM regardless of dataset size |
-| **StreamHash (PTRHash)** | ~2.70 | ~1-75 MB | 1 read (MPHF) or 2 reads (payload) | Optional (probabilistic, via fingerprint) | Fixed RAM, fastest queries |
-| RecSplit | ~1.56 | O(N) | Multiple reads | No | Best compression, slow construction, higher RAM |
-| PTRHash (Rust) | ~2.1–3.0 | O(N) | 1 disk read | No | Multiple modes: fast (~3.0), balanced (~2.4), compact (~2.1) |
-| CHD / CMPH | ~2.07 | O(N) | Multiple reads | No | Classic approach |
-| Cuckoo Filter | ~8-12 | O(N) | 1-2 reads | Yes (probabilistic) | Different purpose |
-| Bloom Filter | ~10 | O(N) | k reads | Yes (probabilistic) | Different purpose |
-
-StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming RecSplit for faster build times. The framework itself is algorithm-agnostic — a streaming RecSplit implementation could be plugged in to achieve similar bits/key with the same bounded-RAM construction (see §4.5).
-
----
-
-## 4. Framework / Algorithm Contract
+## 3. Framework / Algorithm Contract
 
 StreamHash is designed as an extensible framework. The MPHF algorithm is pluggable: the framework handles key routing, file layout, parallelism, and payload management, while each algorithm provides a solver (build-time) and a decoder (query-time). Currently two algorithms are implemented:
 
 - **Bijection** (AlgoBijection = 0): EF/GR encoding, O(128) checkpoint-based queries, ~2.46 bits/key
 - **PTRHash** (AlgoPTRHash = 1): 8-bit pilots with cuckoo hashing, O(1) metadata decode, ~2.70 bits/key
 
-### 4.1. Build-Time Solver
+### 3.1. Build-Time Solver
 
 At build time, the framework feeds keys to the algorithm one block at a time. The algorithm must:
 
@@ -418,7 +416,7 @@ At build time, the framework feeds keys to the algorithm one block at a time. Th
 
 The solver is **not thread-safe**. In parallel builds, each worker thread creates its own solver instance.
 
-### 4.2. Query-Time Decoder
+### 3.2. Query-Time Decoder
 
 At query time, the framework reads a block's metadata from disk and passes it to the algorithm's decoder. The decoder must:
 
@@ -428,20 +426,20 @@ Fingerprint extraction is handled at the framework level using a unified mixer (
 
 The decoder is **thread-safe** and created once at index open time.
 
-### 4.3. What the Framework Provides
+### 3.3. What the Framework Provides
 
 | Responsibility | Owner |
 |----------------|-------|
 | Key length validation (≥ 16 bytes) | Framework |
 | Block routing (`fastRange32(prefix, numBlocks)`) | Framework |
-| Block index management (§5.4) | Framework |
+| Block index management (§4.4) | Framework |
 | File layout (header, regions, footer) | Framework |
 | Payload/fingerprint storage and retrieval | Framework |
 | Parallel construction coordination | Framework |
 | Unsorted input temp file management | Framework |
 | Streaming integrity hashing (hash-of-hashes) | Framework |
 
-### 4.4. What Algorithms Must Provide
+### 3.4. What Algorithms Must Provide
 
 | Responsibility | Owner |
 |----------------|-------|
@@ -453,7 +451,7 @@ The decoder is **thread-safe** and created once at index open time.
 | Fingerprint extraction strategy (for 16-byte keys) | Algorithm |
 | Duplicate key detection during solving | Algorithm |
 
-### 4.5. Algorithm Requirements
+### 3.5. Algorithm Requirements
 
 Any MPHF algorithm can be plugged into the framework, provided it satisfies these requirements:
 
@@ -469,9 +467,9 @@ Any MPHF algorithm can be plugged into the framework, provided it satisfies thes
 
 **Prefix routing requires uniform input.** Block assignment depends on the key prefix distribution. If keys are highly non-uniform (e.g., all keys share a common prefix), blocks will be severely imbalanced — in the worst case collapsing to a single block. This is why §1.5 requires pre-hashing for non-random input: pre-hashing with a 128-bit hash (see Appendix A) ensures the prefix is uniformly distributed, which in turn ensures balanced block assignment.
 
-**Framework extensibility:** Other algorithms can be added beyond Bijection and PTRHash. For example, RecSplit could be adapted to achieve close to ~1.56 bits/key with the same bounded-RAM streaming construction — the algorithm only needs a build-time solver and a query-time decoder (see §4.1 and §4.2). (The standalone RecSplit figure is ~1.56 bits/key; framework overhead from the per-block index and fixed costs would add a small amount, likely ~1.6–1.7 bits/key in practice.)
+**Framework extensibility:** Other algorithms can be added beyond Bijection and PTRHash. For example, RecSplit could be adapted to achieve close to ~1.56 bits/key with the same bounded-RAM streaming construction — the algorithm only needs a build-time solver and a query-time decoder (see §3.1 and §3.2). (The standalone RecSplit figure is ~1.56 bits/key; framework overhead from the per-block index and fixed costs would add a small amount, likely ~1.6–1.7 bits/key in practice.)
 
-### 4.6. Adding a New Algorithm
+### 3.6. Adding a New Algorithm
 
 To add a new algorithm, you need to provide:
 
@@ -494,11 +492,11 @@ The `AlgoConfig` section in the file layout (variable-length section after heade
 
 ---
 
-## 5. File Format
+## 4. File Format
 
 The file format is language-independent. The byte layouts, encoding formats, and hash functions specified below are sufficient to produce interoperable files from any implementation language. Go-specific terminology in this document refers to the reference implementation.
 
-### 5.1. File Layout
+### 4.1. File Layout
 
 ```
 +--------------------------------------------------+
@@ -545,7 +543,7 @@ where:
 - `N` = TotalKeys
 - `entrySize` = PayloadSize + FingerprintSize
 
-### 5.2. Header (64 bytes)
+### 4.2. Header (64 bytes)
 
 | Offset | Size | Field | Type | Description |
 |--------|------|-------|------|-------------|
@@ -562,7 +560,7 @@ where:
 
 **Note:** `TotalBuckets`, `BucketsPerBlock`, and `PrefixBits` are **not in the header**. These are algorithm-internal constants. Each algorithm derives bucket counts from `NumBlocks` using its own `lambda` and `bucketsPerBlock`.
 
-### 5.3. Variable-Length Sections
+### 4.3. Variable-Length Sections
 
 Immediately after the 64-byte header:
 
@@ -607,7 +605,7 @@ This example shows:
 - Metadata region starts immediately with block 0's metadata
 - Footer at the end
 
-### 5.4. RAM Index
+### 4.4. RAM Index
 
 The RAM index contains `NumBlocks + 1` entries (the extra entry is a sentinel entry — an extra entry beyond the last real block, used to compute the last block's size by subtraction).
 
@@ -639,7 +637,7 @@ This avoids storing payload offsets in the RAM index.
 
 **RAM index is an optimization, not a requirement.** The file format supports queries without loading the RAM index into memory. The RAM index is at a fixed, computable file offset. A query can read the two needed entries (20 bytes, contiguous) directly from disk. This adds one disk read: MPHF mode goes from 1 to 2 reads, payload mode from 2 to 3. The RAM index is small (10 bytes/block, e.g., ~32 KB for 10M keys with Bijection) so keeping it in memory is cheap, but not mandatory.
 
-### 5.5. Payload Region
+### 4.5. Payload Region
 
 Payloads are stored contiguously in a separated region. Each entry is `PayloadSize + FingerprintSize` bytes, stored at the key's global rank position:
 
@@ -653,11 +651,11 @@ Both fingerprints and payloads are stored in little-endian byte order within eac
 
 Fingerprints are stored first within each entry for efficient access during verification.
 
-### 5.6. Metadata Region
+### 4.6. Metadata Region
 
 Contains per-block metadata in block order. Each block's metadata is variable-length and algorithm-specific:
 
-- **Bijection:** Checkpoints (28B, see §6.7) + Elias-Fano data (a succinct representation for monotonically increasing integer sequences — see §6.5) + Golomb-Rice seed stream (a variable-length encoding efficient for geometrically distributed values — see §6.6) + fallback list
+- **Bijection:** Checkpoints (28B, see §5.7) + Elias-Fano data (a succinct representation for monotonically increasing integer sequences — see §5.5) + Golomb-Rice seed stream (a variable-length encoding efficient for geometrically distributed values — see §5.6) + fallback list
 - **PTRHash:** Pilot bytes (bucketsPerBlock bytes) + remap table
 
 **Empty blocks** (keysInBlock = 0) still have metadata entries:
@@ -665,7 +663,7 @@ Contains per-block metadata in block order. Each block's metadata is variable-le
 - **PTRHash**: bucketsPerBlock zero bytes (all-zero pilots) + uint16_le(0) (empty remap table) = 10,002 bytes.
 - **Bijection**: 28-byte zero checkpoints + Elias-Fano encoding for 1024 zero-valued cumulatives (128 bytes) + 1 zero byte (empty seed stream) = 157 bytes.
 
-### 5.7. Footer (32 bytes)
+### 4.7. Footer (32 bytes)
 
 | Offset | Size | Field | Type |
 |--------|------|-------|------|
@@ -695,9 +693,9 @@ Both hashes use canonical (unseeded) xxHash64:
 
 ---
 
-## 6. Algorithm: Bijection
+## 5. Algorithm: Bijection
 
-### 6.1. Overview
+### 5.1. Overview
 
 The Bijection algorithm combines several well-known MPHF techniques:
 
@@ -713,7 +711,7 @@ Where Bijection diverges from RecSplit: it replaces RecSplit's tree-based recurs
 - `splitThreshold = 8` (buckets ≥ 8 keys use splitting)
 - `checkpointInterval = 128`
 
-### 6.2. Bucket Assignment
+### 5.2. Bucket Assignment
 
 Bijection uses **uniform bucket assignment** via `fastRange32`:
 
@@ -723,7 +721,7 @@ localBucket = fastRange32(k0, bucketsPerBlock)
 where k0 = LittleEndian.Uint64(key[0:8])
 ```
 
-### 6.3. Mix Function
+### 5.3. Mix Function
 
 The Mix function computes a slot index within a bucket. The goal is: given a seed, map each key to a slot in [0, bucketSize) such that different seeds produce different slot assignments. The solver tries seeds sequentially until it finds one where all keys in the bucket land on distinct slots (a bijection).
 
@@ -737,7 +735,7 @@ The XOR structure `(k0 ^ globalSeed ^ seed, k1 ^ globalSeed)` ensures that each 
 
 `wymix(a, b)` is the WyHash v4 mixing primitive: a 128-bit multiply with XOR fold. It computes `hi, lo = Mul128(a, b); return hi ^ lo`. The 128-bit multiply provides strong avalanche — small changes in either input (e.g., incrementing the seed by 1) produce uncorrelated outputs, which is essential for the brute-force seed search to converge quickly.
 
-### 6.4. Bijection Solving
+### 5.4. Bijection Solving
 
 For each bucket, find a seed that makes the Mix function a bijection (no slot collisions):
 
@@ -749,7 +747,7 @@ For each bucket, find a seed that makes the Mix function a bijection (no slot co
 
 **Fallback:** Seeds that exceed Golomb-Rice encoding limits are stored in a fallback list at the end of the metadata block.
 
-### 6.5. Elias-Fano Encoding
+### 5.5. Elias-Fano Encoding
 
 Cumulative bucket sizes are encoded using Elias-Fano. This is a succinct representation of a monotonically increasing sequence:
 
@@ -787,7 +785,7 @@ Lower bits: (empty, since lowBits = 0)
 
 For larger blocks with more keys, lowBits > 0, and the lower bits store the low-order bits of each cumulative value while the upper bits store the high-order bits in unary encoding.
 
-### 6.6. Golomb-Rice Seed Encoding
+### 5.6. Golomb-Rice Seed Encoding
 
 Seeds are encoded using Golomb-Rice coding with parameter `k` derived from bucket size:
 
@@ -841,7 +839,7 @@ The actual seed value (70) is stored in the fallback list at the end of the meta
 
 **Note:** Golomb-Rice encoding only covers bucket sizes 2–8. For split buckets (size ≥ 8), sub-buckets larger than 8 keys force a fallback marker.
 
-### 6.7. Metadata Format (Bijection)
+### 5.7. Metadata Format (Bijection)
 
 ```
 Offset  Size          Content
@@ -877,7 +875,7 @@ Fields:
 
 At decode time, the fallback list is located by searching backwards from the end of metadata for a valid `count`/`validation` pair.
 
-### 6.8. Query (Bijection)
+### 5.8. Query (Bijection)
 
 ```
 function QuerySlotBijection(k0, k1, metadata, keysInBlock) → localSlot:
@@ -912,24 +910,24 @@ function QuerySlotBijection(k0, k1, metadata, keysInBlock) → localSlot:
     return localSlot
 ```
 
-### 6.9. Fingerprint Extraction
+### 5.9. Fingerprint Extraction
 
 Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.6 for the
 unified hybrid extraction strategy using a mixer over both k0 and k1.
 
 ---
 
-## 7. Algorithm: PTRHash Adaptation
+## 6. Algorithm: PTRHash Adaptation
 
-### 7.1. Overview
+### 6.1. Overview
 
-StreamHash's PTRHash adaptation is based on PtrHash by [Groot Koerkamp](https://github.com/RagnarGrootKoerkamp/PtrHash) ([paper](https://arxiv.org/abs/2502.15539)), with several modifications for streaming construction (see §7.9–§7.13).
+StreamHash's PTRHash adaptation is based on PtrHash by [Groot Koerkamp](https://github.com/RagnarGrootKoerkamp/PtrHash) ([paper](https://arxiv.org/abs/2502.15539)), with several modifications for streaming construction (see §6.9–§6.13).
 
 PTRHash is normally built as a monolithic O(N)-RAM structure over millions of keys per part. StreamHash adapts it for streaming construction with small, fixed-size blocks (~31,600 keys each), enabling bounded-RAM builds while preserving PTRHash's O(1) query performance.
 
 **Understanding pilots:** In PTRHash, a **pilot** is a small integer (0-255) assigned to each bucket that acts as a "steering parameter." When the algorithm processes a key, it (1) identifies which bucket the key belongs to, (2) retrieves that bucket's pilot value, and (3) combines the key and pilot to compute the final slot position. The pilot value is chosen during construction by trying different values until one is found that maps all keys in the bucket to collision-free slots. You can think of the pilot as guiding its bucket's keys into available positions in the output array, avoiding collisions with keys from other buckets.
 
-The adaptation uses CubicEps bucket distribution (a skewed assignment that creates a few large buckets and many small ones — see §7.2), 8-bit pilots (0-255) with cuckoo hashing (a hash table technique where items can be displaced to alternative positions to resolve collisions) for collision resolution, and a remap table for overflow slots. Queries decode pilots directly (no EF/GR).
+The adaptation uses CubicEps bucket distribution (a skewed assignment that creates a few large buckets and many small ones — see §6.2), 8-bit pilots (0-255) with cuckoo hashing (a hash table technique where items can be displaced to alternative positions to resolve collisions) for collision resolution, and a remap table for overflow slots. Queries decode pilots directly (no EF/GR).
 
 **Parameters:**
 - `lambda = 3.16` (average keys per bucket)
@@ -944,13 +942,13 @@ The adaptation uses CubicEps bucket distribution (a skewed assignment that creat
 - **Largest bucket:** Due to CubicEps skew, bucket 0 gets ~1.08% of keys = ~341 keys
 - **Pilot search:** Each bucket tries up to 256 pilots to find collision-free slot assignments
 
-**Why 10,000 buckets per block?** See §7.12 for the full rationale. In brief: streaming construction requires small, fixed-size blocks. The CubicEps distribution creates a heavy-tailed largest bucket (~1.08% of keys). At 10K buckets per block (~31,600 keys), the largest bucket is ~341 keys, giving a per-block failure probability of ~4.4×10⁻¹². This figure is derived from the cuckoo placement analysis in the PtrHash paper applied to bucket 0: each of K_eff ≈ 256 independent pilots is an independent trial, so P(block fails) ≈ (1 − p)^256 where p is the single-pilot success probability for the ~341-key bucket. At 1T keys (~31.6M blocks), the expected build failure rate is 31.6M × 4.4×10⁻¹² ≈ 1/7,200.
+**Why 10,000 buckets per block?** See §6.12 for the full rationale. In brief: streaming construction requires small, fixed-size blocks. The CubicEps distribution creates a heavy-tailed largest bucket (~1.08% of keys). At 10K buckets per block (~31,600 keys), the largest bucket is ~341 keys, giving a per-block failure probability of ~4.4×10⁻¹². This figure is derived from the cuckoo placement analysis in the PtrHash paper applied to bucket 0: each of K_eff ≈ 256 independent pilots is an independent trial, so P(block fails) ≈ (1 − p)^256 where p is the single-pilot success probability for the ~341-key bucket. At 1T keys (~31.6M blocks), the expected build failure rate is 31.6M × 4.4×10⁻¹² ≈ 1/7,200.
 
 **Why ~341 keys in bucket 0?** Due to the cubic CDF shape, bucket 0 captures a disproportionate share of keys. Empirically measured: ~1.08% of keys → ~341 keys for a 31,600-key block.
 
 **Build algorithm:** The PTRHash build algorithm uses two-phase pilot search with cuckoo-style eviction. For the full algorithm, see the [PtrHash paper](https://arxiv.org/abs/2502.15539).
 
-### 7.2. Bucket Assignment
+### 6.2. Bucket Assignment
 
 PTRHash uses **CubicEps bucket assignment** for skewed bucket sizes:
 
@@ -986,7 +984,7 @@ function CubicEpsBucket(x: uint64, numBuckets: uint32) → uint32:
     return fastRange32(scaled, numBuckets)
 ```
 
-### 7.3. Pilot Hash
+### 6.3. Pilot Hash
 
 ```
 function PilotHash(pilot, globalSeed) → hp:
@@ -1000,9 +998,9 @@ function PilotHash(pilot, globalSeed) → hp:
     return x | 1   // ensure odd (bijective multiplication) and non-zero
 ```
 
-**Design note:** The SplitMix64 finalizer is not present in canonical PTRHash. StreamHash adds it to ensure pilot independence at small block sizes (~31,600 keys). Without this finalizer, correlated pilots waste attempts and increase build failure probability. With it, effectively all 256 pilots produce independent hash patterns, reducing the failure rate at 1T keys from ~1 in 30 builds to ~1 in 7,200 builds. See §7.11 for detailed analysis.
+**Design note:** The SplitMix64 finalizer is not present in canonical PTRHash. StreamHash adds it to ensure pilot independence at small block sizes (~31,600 keys). Without this finalizer, correlated pilots waste attempts and increase build failure probability. With it, effectively all 256 pilots produce independent hash patterns, reducing the failure rate at 1T keys from ~1 in 30 builds to ~1 in 7,200 builds. See §6.11 for detailed analysis.
 
-### 7.4. Slot Computation
+### 6.4. Slot Computation
 
 ```
 function PilotSlotFromHashes(k0, k1, pilot, numSlots, globalSeed) → slot:
@@ -1012,14 +1010,14 @@ function PilotSlotFromHashes(k0, k1, pilot, numSlots, globalSeed) → slot:
     return slot
 ```
 
-**Design note:** This diverges from canonical PTRHash in two ways: (1) multiplication mixing (`× hp`) replaces XOR mixing (`^ hp`) for stronger avalanche properties, and (2) `k0 ^ k1` replaces a single hash half for 128-bit collision resistance. The XOR of both key halves ensures the slot input is independent of the k1-only bucket assignment. See §7.9 and §7.10 for analysis.
+**Design note:** This diverges from canonical PTRHash in two ways: (1) multiplication mixing (`× hp`) replaces XOR mixing (`^ hp`) for stronger avalanche properties, and (2) `k0 ^ k1` replaces a single hash half for 128-bit collision resistance. The XOR of both key halves ensures the slot input is independent of the k1-only bucket assignment. See §6.9 and §6.10 for analysis.
 
 Key points:
-- **Slot input is `k0 ^ k1`**, not just `k1`. This ensures 128-bit collision resistance. See §7.10.
-- **Multiplication mixing** (`(h ^ (h >> 32)) × hp`), not XOR (`h ^ hp`). See §7.9.
+- **Slot input is `k0 ^ k1`**, not just `k1`. This ensures 128-bit collision resistance. See §6.10.
+- **Multiplication mixing** (`(h ^ (h >> 32)) × hp`), not XOR (`h ^ hp`). See §6.9.
 - `numSlots = ceil(keysInBlock / alpha)`
 
-### 7.5. Remap Table
+### 6.5. Remap Table
 
 Because `alpha < 1.0`, `numSlots > keysInBlock`. Slots in `[keysInBlock, numSlots)` are "overflow" slots that must be remapped to "holes" in `[0, keysInBlock)`.
 
@@ -1036,7 +1034,7 @@ if slot >= keysInBlock:
     slot = remapTable[slot - keysInBlock]
 ```
 
-### 7.6. Metadata Format (PTRHash)
+### 6.6. Metadata Format (PTRHash)
 
 ```
 Offset  Size                      Content
@@ -1048,7 +1046,7 @@ BPB+2   RemapCount × 2 bytes     RemapEntries (uint16_le each)
 
 where `BPB = bucketsPerBlock = 10,000`.
 
-### 7.7. Query (PTRHash)
+### 6.7. Query (PTRHash)
 
 ```
 function QuerySlotPTRHash(k0, k1, metadata, keysInBlock) → localSlot:
@@ -1070,16 +1068,16 @@ function QuerySlotPTRHash(k0, k1, metadata, keysInBlock) → localSlot:
     return slot
 ```
 
-### 7.8. Fingerprint Extraction (PTRHash)
+### 6.8. Fingerprint Extraction (PTRHash)
 
 Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.6 for the
 unified hybrid extraction strategy using a mixer over both k0 and k1.
 
-### PTRHash Divergence Summary (§7.9–§7.13)
+### PTRHash Divergence Summary (§6.9–§6.13)
 
 The following subsections provide detailed reference and comparison for where StreamHash's PTRHash adaptation diverges from the Rust PtrHash implementation by Groot Koerkamp. Each divergence is cross-referenced from the relevant algorithm section above and is motivated by StreamHash's small, fixed-size blocks (~31,600 keys) — substantially smaller than the Rust implementation's dynamic part sizes (millions of keys). At this smaller scale, several aspects of the original design (XOR mixing, 64-bit slot input, simple pilot hashing) become unreliable, requiring the modifications described below.
 
-### 7.9. Divergence: Slot Mixing — Multiplication instead of XOR
+### 6.9. Divergence: Slot Mixing — Multiplication instead of XOR
 
 | | Rust PTRHash | StreamHash |
 |---|---|---|
@@ -1096,7 +1094,7 @@ With XOR mixing (`slot = fastRange32(h ^ hp, n)`), collision *pairs* are pilot-i
 
 With MUL mixing (`slot = fastRange32((h ^ (h >> 32)) × hp, n)`), the collision condition depends on hp non-linearly. Different pilots see different collision structures, making them approximately independent trials (K_eff ≈ 256).
 
-### 7.10. Divergence: Slot Input — k0^k1 instead of hx.low()
+### 6.10. Divergence: Slot Input — k0^k1 instead of hx.low()
 
 | | Rust PTRHash | StreamHash |
 |---|---|---|
@@ -1105,7 +1103,7 @@ With MUL mixing (`slot = fastRange32((h ^ (h >> 32)) × hp, n)`), the collision 
 
 **Why:** StreamHash uses the first 16 key bytes directly as k0 and k1 (no upfront hash). Originally, k1 was used for both bucket assignment AND slot computation, creating a 64-bit collision vulnerability (~0.83% failure at 100B keys). Using `k0 ^ k1` for slots ensures the slot input is independent of the k1-only bucket assignment while using bits from both halves for 128-bit collision resistance.
 
-### 7.11. Divergence: PilotHash — SplitMix64 Finalizer
+### 6.11. Divergence: PilotHash — SplitMix64 Finalizer
 
 | | Rust PTRHash | StreamHash |
 |---|---|---|
@@ -1118,11 +1116,11 @@ With MUL mixing (`slot = fastRange32((h ^ (h >> 32)) × hp, n)`), the collision 
 
 *Note on estimation:* The effectively independent pilot count can be estimated by fitting observed per-bucket failure rates to the model P(all 256 pilots fail) = (1 − p)^K, where p is the single-pilot success probability for the largest bucket and K is the effective count.
 
-The `| 1` in PilotHash (§7.3) ensures the result is odd (bijective multiplication mod 2^64) and prevents `hp = 0`.
+The `| 1` in PilotHash (§6.3) ensures the result is odd (bijective multiplication mod 2^64) and prevents `hp = 0`.
 
 **How Rust compensates:** The Rust implementation uses the Vigna formula to compute very large part sizes (~millions of keys per part). At that scale, even with only a few effectively independent pilots, individual bucket failure probabilities are extremely small relative to the slot pool. StreamHash's small blocks (31,600 keys) require high pilot independence.
 
-### 7.12. Divergence: Block Sizing — Fixed 10K Buckets instead of Dynamic Vigna Formula
+### 6.12. Divergence: Block Sizing — Fixed 10K Buckets instead of Dynamic Vigna Formula
 
 | | Rust PTRHash | StreamHash |
 |---|---|---|
@@ -1134,9 +1132,9 @@ The `| 1` in PilotHash (§7.3) ensures the result is odd (bijective multiplicati
 - Single metadata read per query
 - Parallel builds (each block's MPHF is solved independently; output is sequenced by a coordinator)
 
-The tradeoff: small blocks have higher per-block failure probability, requiring better pilot independence (solved by SplitMix64, §7.11).
+The tradeoff: small blocks have higher per-block failure probability, requiring better pilot independence (solved by SplitMix64, §6.11).
 
-### 7.13. Divergence: No Full-Key Hash (Suffix-Based Hashing)
+### 6.13. Divergence: No Full-Key Hash (Suffix-Based Hashing)
 
 | | Rust PTRHash | StreamHash |
 |---|---|---|
@@ -1146,23 +1144,23 @@ The tradeoff: small blocks have higher per-block failure probability, requiring 
 
 ---
 
-## 8. Implementation Notes
+## 7. Implementation Notes
 
-### 8.0. Implementation Roadmap
+### 7.0. Implementation Roadmap
 
 For implementers, this is the recommended order for building a StreamHash library:
 
 1. **Mental model:** Read §2 (Architecture) and §4 (Contract)
-2. **Query path first:** Implement §5.4 (RAM Index), §6.5 (Elias-Fano decoding), §6.8 (Query)
-3. **Single-threaded build:** Implement §8.1.1 (Sorted Mode), §6.4 (Bijection solving), §6.3 (Mix function)
-4. **Seed encoding:** Add §6.6 (Golomb-Rice encoding/decoding)
+2. **Query path first:** Implement §4.4 (RAM Index), §5.5 (Elias-Fano decoding), §5.8 (Query)
+3. **Single-threaded build:** Implement §7.1.1 (Sorted Mode), §4.4 (Bijection solving), §5.3 (Mix function)
+4. **Seed encoding:** Add §5.6 (Golomb-Rice encoding/decoding)
 5. **Split buckets:** Add deterministic splitting — buckets with ≥8 keys use splitPoint = size/2
-6. **Unsorted input:** Add §8.1.2 (Unsorted Input Mode with temp file routing)
+6. **Unsorted input:** Add §7.1.2 (Unsorted Input Mode with temp file routing)
 7. **Parallelism:** Add multi-threaded builds with worker pools and ordered block delivery
 
 Starting with the query path lets you verify correctness incrementally: build a small index, then test queries before adding complexity.
 
-### 8.1. Construction
+### 7.1. Construction
 
 #### 8.1.1. Sorted Mode (Default)
 
@@ -1227,7 +1225,7 @@ Both sorted and unsorted modes support parallel block building with configurable
 
 **Initialization requirement:** The RAM index must be fully loaded and visible to all threads before concurrent queries begin.
 
-### 8.2. Operational Concerns
+### 7.2. Operational Concerns
 
 #### 8.2.1. Key Length and Collision Analysis
 
@@ -1240,7 +1238,7 @@ Keys must be at least 16 bytes. StreamHash uses the first 16 bytes as k0 and k1.
    Pre-hash non-uniform input with xxHash3-128.
 
 2. **ErrIndistinguishableHashes** (PTRHash only): Different keys compute same slot for ALL 256 pilots.
-   Addressed by block sizing and pilot independence (see §7.11, §7.12).
+   Addressed by block sizing and pilot independence (see §6.11, §6.12).
    At 1T keys: ~1 in 7,200 builds fails.
 
 **Build failure frequency by scale:**
@@ -1252,7 +1250,7 @@ Keys must be at least 16 bytes. StreamHash uses the first 16 bytes as k0 and k1.
 | 100B keys (~3.16M blocks) | ~1 in 72,000 builds |
 | 1T keys (~31.6M blocks) | ~1 in 7,200 builds |
 
-**Retry guidance:** When a build fails with `ErrIndistinguishableHashes`, retry with a different `globalSeed`. The new seed changes all pilot hashes (§7.3), producing independent slot assignments. Each retry has the same independent failure probability, so a handful of retries is sufficient. For datasets above ~100B keys, callers should wrap the build in a retry loop. The framework cannot retry internally because it does not own the key source — the caller controls the data pipeline and must re-feed keys with a new seed. Bijection does not have this failure mode — its brute-force seed search over an unbounded seed range always succeeds (in practice, seeds are found within the Golomb-Rice encodable range or stored in the fallback list).
+**Retry guidance:** When a build fails with `ErrIndistinguishableHashes`, retry with a different `globalSeed`. The new seed changes all pilot hashes (§6.3), producing independent slot assignments. Each retry has the same independent failure probability, so a handful of retries is sufficient. For datasets above ~100B keys, callers should wrap the build in a retry loop. The framework cannot retry internally because it does not own the key source — the caller controls the data pipeline and must re-feed keys with a new seed. Bijection does not have this failure mode — its brute-force seed search over an unbounded seed range always succeeds (in practice, seeds are found within the Golomb-Rice encodable range or stored in the fallback list).
 
 | Keys | P(128-bit collision) |
 |------|---------------------|
@@ -1345,7 +1343,7 @@ StreamHash assumes uniformly random input. Non-random input causes failure modes
 
 **Non-uniform key distribution:**
 - Keys clustering in blocks cause temp file overflow (unsorted mode)
-- The 7σ Poisson margin (§8.1.2) is calibrated for uniform random keys
+- The 7σ Poisson margin (§7.1.2) is calibrated for uniform random keys
 
 **Correlated keys (e.g., sequential IDs):**
 - Pre-hashing with xxHash3-128 is REQUIRED for non-random keys
@@ -1468,12 +1466,12 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | fastRange32 | Block/bucket routing: `bucket = hi64(hash × n)`. Monotonic for sorted prefixes. See §2.4. |
 | lambda | Target average keys per bucket (3.0 for Bijection, 3.16 for PTRHash) |
 | alpha | PTRHash slot overflow factor (0.99); numSlots = ceil(N/alpha) |
-| Effectively independent pilots | Measure of pilot value independence in PTRHash; the number of pilots (out of 256) that produce truly independent hash patterns. Higher values reduce build failure probability. See §7.11. |
+| Effectively independent pilots | Measure of pilot value independence in PTRHash; the number of pilots (out of 256) that produce truly independent hash patterns. Higher values reduce build failure probability. See §6.11. |
 | CubicEps | Skewed bucket distribution: x²(1+x)/2 × 255/256 + x/256 |
 | Checkpoints | 28-byte block metadata enabling O(128) decode instead of O(1024) |
 | Separated Layout | File layout where payloads are in a contiguous region separate from block metadata |
 | Streaming Construction | Building the index with bounded RAM regardless of dataset size |
 | Remap Table | PTRHash overflow table mapping slots ≥ numKeys to holes in [0, numKeys) |
 | wymix | WyHash v4 mixing primitive: 128-bit multiply with XOR fold (hi ^ lo). See §6.3. |
-| SplitMix64 | PRNG finalizer (Vigna, 2015) providing strong avalanche properties. See §7.3. |
+| SplitMix64 | PRNG finalizer (Vigna, 2015) providing strong avalanche properties. See §6.3. |
 | Cuckoo Hashing | Hash table technique where items can be displaced to alternative positions to resolve collisions |
