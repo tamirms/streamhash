@@ -335,7 +335,7 @@ Monolithic MPHF algorithms must solve the entire key space as a single unit — 
 
 StreamHash's block model eliminates this dependency. Each block's MPHF is solved independently: the algorithm sees only the keys routed to that block and produces a self-contained metadata blob. This enables a pipeline architecture where multiple workers solve blocks in parallel while a single coordinator writes output in block order.
 
-The pipeline is not embarrassingly parallel — the coordinator serializes file writes — but the serialized output step (writing metadata bytes and folding hashes) is fast relative to MPHF solving (the CPU-bound step). As a result, throughput scales near-linearly with worker count: 4 workers achieve ~3–4× single-threaded throughput (see §1.4).
+The pipeline is not embarrassingly parallel — the coordinator serializes file writes — but the serialized output step (writing metadata bytes and folding hashes) is fast relative to MPHF solving (the CPU-bound step). As a result, throughput scales near-linearly with worker count: 4 workers achieve ~3–4× single-threaded throughput (see §1.6).
 
 Queries are also naturally parallel and lock-free: the index is immutable after construction, and each query reads an independent block. No synchronization is needed between concurrent queries.
 
@@ -436,7 +436,7 @@ At query time, the framework reads a block's metadata from disk and passes it to
 
 1. **Compute the local slot** — given `(k0, k1, metadata, keysInBlock)`, return the slot index in [0, keysInBlock)
 
-Fingerprint extraction is handled at the framework level using a unified mixer (see §2.5), not by the decoder.
+Fingerprint extraction is handled at the framework level using a unified mixer (see §2.6), not by the decoder.
 
 The decoder is **thread-safe** and created once at index open time.
 
@@ -926,7 +926,7 @@ function QuerySlotBijection(k0, k1, metadata, keysInBlock) → localSlot:
 
 ### 6.9. Fingerprint Extraction
 
-Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.5 for the
+Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.6 for the
 unified hybrid extraction strategy using a mixer over both k0 and k1.
 
 ---
@@ -1075,7 +1075,7 @@ function QuerySlotPTRHash(k0, k1, metadata, keysInBlock) → localSlot:
 
 ### 7.8. Fingerprint Extraction (PTRHash)
 
-Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.5 for the
+Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.6 for the
 unified hybrid extraction strategy using a mixer over both k0 and k1.
 
 ### PTRHash Divergence Summary (§7.9–§7.14)
@@ -1153,7 +1153,7 @@ The tradeoff: small blocks have higher per-block failure probability, requiring 
 |---|---|---|
 | Fingerprint source | N/A (no fingerprint support) | Unified mixer: trailing bytes for keys >16B, `(k0 ^ (k1 × C)) >> 32` for 16B keys |
 
-**Why:** For 16-byte keys, extracting from a single hash half creates a fragile dependency on which half is "safe" for each algorithm. The mixer `k0 ^ (k1 × 0x517cc1b727220a95)` combines both halves, making extraction algorithm-independent. High bits (>> 32) are used because block assignment constrains k0's low byte via the BigEndian prefix. See §2.5 for the full design rationale.
+**Why:** For 16-byte keys, extracting from a single hash half creates a fragile dependency on which half is "safe" for each algorithm. The mixer `k0 ^ (k1 × 0x517cc1b727220a95)` combines both halves, making extraction algorithm-independent. High bits (>> 32) are used because block assignment constrains k0's low byte via the BigEndian prefix. See §2.6 for the full design rationale.
 
 ---
 
@@ -1201,7 +1201,7 @@ For unsorted input, the framework uses a **two-pass construction** process:
 [keyLen: uint16_le][key: keyLen bytes][payload: PayloadSize bytes]
 ```
 
-The `uint16_le` key-length field limits keys to ≤ 65,535 bytes (see §1.3). In practice, keys are typically 16–64 bytes (hash outputs); this limit exists only as a safety check.
+The `uint16_le` key-length field limits keys to ≤ 65,535 bytes (see §1.5). In practice, keys are typically 16–64 bytes (hash outputs); this limit exists only as a safety check.
 
 **Per-block write cursors:**
 - An array of `numBlocks` counters tracks the write position within each block's region
@@ -1230,7 +1230,7 @@ The 7σ margin provides ~10⁻¹² overflow probability per block (Gaussian tail
 
 #### 8.1.3. Parallel Mode
 
-Both sorted and unsorted modes support parallel block building with configurable worker counts. Workers solve blocks independently; a coordinator thread sequences output in block order. See §2.7 for the architectural rationale. See §1.4 for performance measurements.
+Both sorted and unsorted modes support parallel block building with configurable worker counts. Workers solve blocks independently; a coordinator thread sequences output in block order. See §2.8 for the architectural rationale. See §1.6 for performance measurements.
 
 #### 8.1.4. Thread Safety
 
@@ -1270,7 +1270,7 @@ Keys must be at least 16 bytes. StreamHash uses the first 16 bytes as k0 and k1.
 | 1 billion | ~1.5×10⁻²¹ (≈0) |
 | 100 billion | ~1.5×10⁻¹⁷ (≈0) |
 
-For structured (non-random) input, keys **must** be pre-hashed with a 128-bit hash (see Appendix A). See §2.2 for the definitions of k0, k1, and prefix.
+For structured (non-random) input, keys **must** be pre-hashed with a 128-bit hash (see Appendix A). See §2.3 for the definitions of k0, k1, and prefix.
 
 #### 8.2.2. Payload Modes
 
@@ -1456,9 +1456,9 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 |------|------------|
 | MPHF | Minimal Perfect Hash Function — bijection from N keys to [0, N) |
 | Bijection | One-to-one mapping with no collisions |
-| prefix | First 8 bytes of a key, interpreted as **big-endian** uint64, used for block routing (see §2.2) |
-| k0 | First 8 bytes of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.2) |
-| k1 | Bytes 8-15 of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.2) |
+| prefix | First 8 bytes of a key, interpreted as **big-endian** uint64, used for block routing (see §2.3) |
+| k0 | First 8 bytes of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.3) |
+| k1 | Bytes 8-15 of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.3) |
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query |
 | Bucket | A small group of keys within a block that share the same bucket index (computed by the algorithm from the key's hash values) |
 | Slot | Position within a block (0 to keysInBlock-1); output of the algorithm for a key |
@@ -1476,7 +1476,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | Fingerprint | Bytes stored per entry to detect non-member queries (1-4 bytes) |
 | UserMetadata | Variable-length application-defined data stored after header |
 | AlgoConfig | Variable-length algorithm-specific configuration stored after UserMetadata |
-| fastRange32 | Block/bucket routing: `bucket = hi64(hash × n)`. Monotonic for sorted prefixes. See §2.3. |
+| fastRange32 | Block/bucket routing: `bucket = hi64(hash × n)`. Monotonic for sorted prefixes. See §2.4. |
 | lambda | Target average keys per bucket (3.0 for Bijection, 3.16 for PTRHash) |
 | alpha | PTRHash slot overflow factor (0.99); numSlots = ceil(N/alpha) |
 | Effectively independent pilots | Measure of pilot value independence in PTRHash; the number of pilots (out of 256) that produce truly independent hash patterns. Higher values reduce build failure probability. See §7.11. |
