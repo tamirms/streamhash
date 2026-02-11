@@ -19,22 +19,11 @@
 9. [Appendices](#appendices)
 
 **Document Guide:**
-- **Quick understanding:** Read §1 (Overview) and §2 (Architecture) — §1.1 explains the framework's purpose and §2 walks through the end-to-end query flow
-- **Should I use this?:** Read §3 (Comparison) for trade-offs vs alternatives, §1.5 for algorithm selection guidance
-- **Framework extensibility:** Read §1.1 (framework message) and §4 (Algorithm Contract) for how to plug in new algorithms
-- **Implementation:** Read §2-8 in order; the Glossary (Appendix D) defines all technical terms
+- **Quick understanding:** Read §1 (Overview) and §2 (Architecture) — §1.1 explains what an MPHF is, §1.2 describes the framework, and §2 walks through the end-to-end query flow
+- **Should I use this?:** Read §3 (Comparison) for trade-offs vs alternatives, §1.7 for algorithm selection guidance
+- **Framework extensibility:** Read §1.2 and §4 (Algorithm Contract) for how to plug in new algorithms
+- **Implementation:** See §8.0 for a recommended implementation roadmap. The Glossary (Appendix D) defines all technical terms.
 - **Reference:** §5 (File Format), §6 (Bijection), and §7 (PTRHash) are the normative specification
-
-**Implementation Roadmap (recommended order):**
-1. **Mental model:** Read §2 (Architecture) and §4 (Contract)
-2. **Query path first:** Implement §5.4 (RAM Index), §6.5 (Elias-Fano decoding), §6.8 (Query)
-3. **Single-threaded build:** Implement §8.1.1 (Sorted Mode), §6.4 (Bijection solving), §6.3 (Mix function)
-4. **Seed encoding:** Add §6.6 (Golomb-Rice encoding/decoding)
-5. **Split buckets:** Add deterministic splitting — buckets with ≥8 keys use splitPoint = size/2
-6. **Unsorted input:** Add §8.1.2 (Unsorted Input Mode with temp file routing)
-7. **Parallelism:** Add multi-threaded builds with worker pools and ordered block delivery
-
-Starting with the query path lets you verify correctness incrementally: build a small index, then test queries before adding complexity.
 
 ---
 
@@ -147,11 +136,38 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 
 ## 2. Architecture
 
-**Note:** §2.8 traces a complete example through every step described below — you may want to read it alongside these sections.
+**Note:** §2.9 traces a complete example through every step described below — you may want to read it alongside these sections.
 
 **Terminology:** Key terms are defined when first introduced. A complete glossary is in Appendix D.
 
-### 2.1. Two-Level Dispatch
+### 2.1. Core Concepts
+
+Before diving into the two-level dispatch model, it's helpful to understand why StreamHash is designed this way and what the key abstractions mean.
+
+**What an MPHF does:** A Minimal Perfect Hash Function maps N keys to exactly N consecutive slots [0, N) with no collisions. Given a key, it returns a unique rank that can be used to index into an array or file.
+
+**Why monolithic algorithms are problematic at scale:** Traditional MPHF algorithms (like RecSplit or standalone PTRHash) keep all state in RAM during construction. For a billion keys, this means gigabytes of RAM. They also typically access multiple non-contiguous regions during queries, causing random I/O.
+
+**How StreamHash solves this:** StreamHash partitions keys into **blocks** — fixed-size groups of a few thousand keys each. Each block is:
+- Solved independently (enabling bounded RAM and parallelism)
+- Stored contiguously on disk (enabling single-read queries)
+- Small enough to fit metadata in one page (~1 KB for Bijection)
+
+**Within each block:** Keys are grouped into **buckets** — small groups averaging ~3 keys. For each bucket, the algorithm searches for a **seed** (also called a **pilot**) that makes the hash collision-free, assigning each key in the bucket a unique **slot** (position within the block, 0 to keysInBlock-1).
+
+**Computing the final rank:** The framework tracks how many keys came before each block. The final MPHF output for a key is:
+```
+rank = keysBefore + localSlot
+```
+
+This gives each key a globally unique rank in [0, N).
+
+**Why two levels?** The **framework** handles block routing (using the key prefix), file layout, and parallelism. The **algorithm** handles bucket organization and slot computation within each block. This separation means:
+- New algorithms can be plugged in without changing the framework
+- Algorithms only see bounded subsets of keys (a single block at a time)
+- Query locality is guaranteed by the framework's file layout
+
+### 2.2. Two-Level Dispatch
 
 StreamHash partitions keys into fixed-size groups called *blocks*, each containing a few thousand keys. It uses a **two-level dispatch** model separating framework concerns from algorithm-specific logic:
 
@@ -170,7 +186,7 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 - Computes the local slot index within the block using algorithm-specific metadata
 - Each algorithm has its own bucket organization, seed search, and encoding
 
-### 2.2. Key Terminology
+### 2.3. Key Terminology
 
 | Term | Definition |
 |------|------------|
@@ -185,7 +201,7 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 
 Note: `prefix` and `k0` are two different integer interpretations of the **same 8 bytes** (bytes 0-7 of the key). The framework needs big-endian (`prefix`) so that sorted key bytes produce sorted integers for monotonic block routing. The algorithm needs little-endian (`k0`) because it's the native CPU format for arithmetic. They contain the same information — `prefix = ReverseBytes64(k0)` — but serve different purposes at different layers.
 
-### 2.3. Block Routing
+### 2.4. Block Routing
 
 The framework routes keys to blocks using `fastRange32`:
 
@@ -216,7 +232,7 @@ For example, with Bijection (lambda=3, bucketsPerBlock=1024): 10M keys → ~3.33
 Note: Keys in the same block share similar prefix values, but k1 (bytes 8-15) is
 independent of prefix, and slot computation depends on both k0 and k1 for full 128-bit collision resistance.
 
-### 2.4. Data Flow Overview
+### 2.5. Data Flow Overview
 
 ```
                     +----------------------------------------+
@@ -245,7 +261,7 @@ independent of prefix, and slot computation depends on both k0 and k1 for full 1
                     globalRank = keysBefore + localSlot
 ```
 
-### 2.5. Query Pseudocode (Framework Level)
+### 2.6. Query Pseudocode (Framework Level)
 
 This shows how the two-level dispatch works. The core query path computes the rank; optional fingerprint verification (when configured) can detect non-member keys.
 
@@ -303,7 +319,7 @@ function extractFingerprintHybrid(key, k0, k1) → uint32:
 
 `packBytes` interprets the given byte slice as a little-endian unsigned integer, zero-extended to uint32. For example, `packBytes([0xAB, 0xCD])` returns `0x0000CDAB`.
 
-### 2.6. Query Locality
+### 2.7. Query Locality
 
 **Framework locality advantage:** StreamHash stores all metadata for a group of keys contiguously on disk. For example, the Bijection algorithm's metadata per block is typically ~1 KB, fitting within a single 4 KB page. This means computing the MPHF rank requires reading one contiguous region — a single page fault in the common case.
 
@@ -313,7 +329,7 @@ function extractFingerprintHybrid(key, k0, k1) → uint32:
 
 **Payload mode:** When payloads or fingerprints are configured, queries always require two reads (metadata region + payload region) since these are at different file offsets.
 
-### 2.7. Build Parallelism
+### 2.8. Build Parallelism
 
 Monolithic MPHF algorithms must solve the entire key space as a single unit — the hash function for key N depends on decisions made for keys 1 through N-1, preventing meaningful parallelization of construction.
 
@@ -323,7 +339,7 @@ The pipeline is not embarrassingly parallel — the coordinator serializes file 
 
 Queries are also naturally parallel and lock-free: the index is immutable after construction, and each query reads an independent block. No synchronization is needed between concurrent queries.
 
-### 2.8. Worked Example
+### 2.9. Worked Example
 
 Tracing a single key through the entire system (Bijection algorithm, 10M keys). This example references Bijection-specific concepts (Elias-Fano, Golomb-Rice, buckets with lambda=3) defined in §6 — skip ahead to §6 first if the details are unfamiliar, or read this at a high level to see how the framework and algorithm layers interact:
 
@@ -1064,6 +1080,20 @@ The tradeoff: small blocks have higher per-block failure probability, requiring 
 ---
 
 ## 8. Implementation Notes
+
+### 8.0. Implementation Roadmap
+
+For implementers, this is the recommended order for building a StreamHash library:
+
+1. **Mental model:** Read §2 (Architecture) and §4 (Contract)
+2. **Query path first:** Implement §5.4 (RAM Index), §6.5 (Elias-Fano decoding), §6.8 (Query)
+3. **Single-threaded build:** Implement §8.1.1 (Sorted Mode), §6.4 (Bijection solving), §6.3 (Mix function)
+4. **Seed encoding:** Add §6.6 (Golomb-Rice encoding/decoding)
+5. **Split buckets:** Add deterministic splitting — buckets with ≥8 keys use splitPoint = size/2
+6. **Unsorted input:** Add §8.1.2 (Unsorted Input Mode with temp file routing)
+7. **Parallelism:** Add multi-threaded builds with worker pools and ordered block delivery
+
+Starting with the query path lets you verify correctness incrementally: build a small index, then test queries before adding complexity.
 
 ### 8.1. Construction
 
