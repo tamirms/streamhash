@@ -146,14 +146,14 @@ Before diving into the two-level dispatch model, it's helpful to understand why 
 
 **What an MPHF does:** A Minimal Perfect Hash Function maps N keys to exactly N consecutive slots [0, N) with no collisions. Given a key, it returns a unique rank that can be used to index into an array or file.
 
-**Why monolithic algorithms are problematic at scale:** Traditional MPHF algorithms (like RecSplit or standalone PTRHash) keep all state in RAM during construction. For a billion keys, this means gigabytes of RAM. They also typically access multiple non-contiguous regions during queries, causing random I/O.
+**Why monolithic algorithms are problematic at scale:** Traditional MPHF algorithms keep all state in RAM during construction. For a billion keys, this means gigabytes of RAM. Some algorithms (like RecSplit) also access multiple non-contiguous regions during queries, causing random I/O.
 
 **How StreamHash solves this:** StreamHash partitions keys into **blocks** — fixed-size groups of a few thousand keys each. Each block is:
 - Solved independently (enabling bounded RAM and parallelism)
 - Stored contiguously on disk (enabling single-read queries)
 - Small enough to fit metadata in one page (~1 KB for Bijection)
 
-**Within each block:** Keys are grouped into **buckets** — small groups averaging ~3 keys. For each bucket, the algorithm searches for a **seed** (also called a **pilot**) that makes the hash collision-free, assigning each key in the bucket a unique **slot** (position within the block, 0 to keysInBlock-1).
+**Within each block:** The algorithm assigns keys to local positions. Both current algorithms (Bijection and PTRHash) use the concept of **buckets** — small groups averaging ~3 keys — and search for a **seed** (also called a **pilot**) for each bucket that makes the hash collision-free. Each key is assigned a unique **slot** (position within the block, 0 to keysInBlock-1).
 
 **Computing the final rank:** The framework tracks how many keys came before each block. The final MPHF output for a key is:
 ```
@@ -194,7 +194,7 @@ Query(key) → Framework routes key to block → Algorithm computes slot within 
 | `k0` | The same first 8 bytes interpreted as **little-endian** uint64 (= `ReverseBytes64(prefix)`). Used by **algorithms** for slot/bucket computation. Little-endian is the native integer format on most CPUs, avoiding byte-swap overhead in hash arithmetic. |
 | `k1` | Bytes 8-15 of a key as **little-endian** uint64. Used by **algorithms** for slot/bucket computation. Completely independent of `prefix` — different bytes of the key. |
 | Block | A self-contained group of keys on disk; exactly one block's metadata is read per MPHF query. |
-| Bucket | A small group of keys within a block that share the same bucket index (computed by the algorithm from the key's hash values). The algorithm searches for a seed that makes the hash collision-free within each bucket. |
+| Bucket | A small group of keys within a block that share the same group index (computed by the algorithm from the key's hash values). The algorithm searches for a seed that makes the hash collision-free within each group. |
 | Slot | Position within a block (0 to keysInBlock-1). Output of the algorithm for a specific key. |
 | Rank | Final MPHF output (0 to N-1). Computed as `keysBefore + localSlot`. |
 | `numBlocks` | Total blocks in the index. Determined by the algorithm based on its own parameters. |
@@ -405,7 +405,7 @@ The table below compares StreamHash against alternative MPHF constructions. "O(N
 
 StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming RecSplit for faster build times. The framework itself is algorithm-agnostic — a streaming RecSplit implementation could be plugged in to achieve similar bits/key with the same bounded-RAM construction (see §4.5).
 
-**When StreamHash is overkill:**
+**When StreamHash is not a good fit:**
 - Fewer than ~100K keys — the block overhead dominates; use a simple hash table or a monolithic MPHF
 - Dynamic dataset — StreamHash is static; use a hash table or cuckoo filter instead
 
