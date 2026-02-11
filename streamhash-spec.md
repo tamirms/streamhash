@@ -947,6 +947,13 @@ The adaptation uses CubicEps bucket distribution (a skewed assignment that creat
 - `bucketsPerBlock = 10,000`
 - `numPilotValues = 256` (pilots 0-255)
 
+**Example:** For a block with 31,600 keys:
+- **Buckets:** 10,000 buckets → average 3.16 keys/bucket (31,600 ÷ 10,000)
+- **Slots:** ceil(31,600 / 0.99) = 31,920 slots (1% overflow for collision resolution)
+- **Metadata size:** 10,000 pilot bytes (one per bucket) + remap table (~320 bytes for ~320 overflow slots) ≈ 10.3 KB per block
+- **Largest bucket:** Due to CubicEps skew, bucket 0 gets ~1.08% of keys = ~341 keys
+- **Pilot search:** Each bucket tries up to 256 pilots to find collision-free slot assignments
+
 **Why 10,000 buckets per block?** See §7.12 for the full rationale. In brief: streaming construction requires small, fixed-size blocks. The CubicEps distribution creates a heavy-tailed largest bucket (~1.08% of keys). At 10K buckets per block (~31,600 keys), the largest bucket is ~341 keys, giving a per-block failure probability of ~4.4×10⁻¹². This figure is derived from the cuckoo placement analysis in the PtrHash paper applied to bucket 0: each of K_eff ≈ 256 independent pilots is an independent trial, so P(block fails) ≈ (1 − p)^256 where p is the single-pilot success probability for the ~341-key bucket. At 1T keys (~31.6M blocks), the expected build failure rate is 31.6M × 4.4×10⁻¹² ≈ 1/7,200.
 
 **Why ~341 keys in bucket 0?** Due to the cubic CDF shape, bucket 0 captures a disproportionate share of keys. Empirically measured: ~1.08% of keys → ~341 keys for a 31,600-key block.
