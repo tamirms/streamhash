@@ -31,9 +31,10 @@ const (
 	// triggers retries). So the 1.4×10⁻⁴ figure is the actual build failure rate
 	// at 1T keys — about 1 in 7,200 builds. This is acceptable for production use.
 	//
-	// This requires K_eff ≈ 256, which is achieved by the SplitMix64 finalizer
-	// in pilotHash. Without it, K_eff drops to ~180-225, and ~1 in 30 builds
-	// at 1T keys would fail. See pilot.go.
+	// This requires the 256 pilots to behave as approximately independent trials,
+	// which is achieved by the SplitMix64 finalizer in pilotHash. Without it,
+	// the pilots become correlated (only ~180-225 independent trials), and ~1 in
+	// 30 builds at 1T keys would fail. See pilot.go.
 	bucketsPerBlock = 10000
 
 	// numPilotValues is the total number of pilot values to try (0-255 = 256 values).

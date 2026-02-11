@@ -33,22 +33,22 @@ const (
 // The function applies a SplitMix64 finalizer to the raw multiplication
 // C*(pilot^globalSeed). This achieves two goals:
 //
-// 1. PILOT INDEPENDENCE (K_eff ≈ 256)
+// 1. PILOT INDEPENDENCE (≈256 independent trials)
 //
 //    Without the finalizer, pilot hash values are correlated: the raw
 //    multiplication C*x produces outputs where nearby inputs share high-bit
 //    patterns. Empirically measured (10,000 trials):
 //
-//      Without SplitMix64:  K_eff = 180-225 (pilots are correlated)
-//      With SplitMix64:     K_eff = 253-259 (pilots are independent)
+//      Without SplitMix64:  ~180-225 independent trials (pilots are correlated)
+//      With SplitMix64:     ~253-259 independent trials (pilots are independent)
 //
 //    At scale (1T keys, ~31.6M blocks), the per-block failure probability is
-//    exponentially sensitive to K_eff. Without the finalizer (~1 in 30 builds
-//    at 1T keys would fail); with it, builds are reliable (see config.go).
+//    exponentially sensitive to pilot independence. Without the finalizer (~1 in
+//    30 builds at 1T keys would fail); with it, builds are reliable (see config.go).
 //
 //    For comparison, the Rust PTRHash uses XOR slot mixing (h ^ hp) which
-//    yields K_eff ≈ 3-5, requiring much larger parts (~millions of keys)
-//    to compensate. Our MUL slot mixing ((h*hp)^(h>>32)) is inherently
+//    yields only ~3-5 independent trials, requiring much larger parts (~millions
+//    of keys) to compensate. Our MUL slot mixing ((h*hp)^(h>>32)) is inherently
 //    better but still needs SplitMix64 for full independence.
 //
 // 2. "| 1" ENSURES BIJECTIVE MULTIPLICATION
