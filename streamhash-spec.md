@@ -946,7 +946,7 @@ function PilotHash(pilot, globalSeed) → hp:
     return x | 1   // ensure odd (bijective multiplication) and non-zero
 ```
 
-**Design note:** The SplitMix64 finalizer is not present in canonical PTRHash. StreamHash adds it to ensure pilot independence at small block sizes (~31,600 keys). Without this finalizer, correlated pilots waste attempts and increase build failure probability. With it, effectively all 256 pilots produce independent hash patterns, reducing the failure rate at 1T keys from ~1 in 30 builds to ~1 in 7,200 builds. See §6.11 for detailed analysis.
+**Design note:** The SplitMix64 finalizer is not present in canonical PTRHash. StreamHash adds it to ensure pilot independence at small block sizes (~31,600 keys). Without this finalizer, correlated pilots waste attempts and increase build failure probability. With it, all 256 pilots produce independent hash patterns, reducing the failure rate at 1T keys from ~1 in 30 builds to ~1 in 7,200 builds. See §6.11 for detailed analysis.
 
 ### 6.4. Slot Computation
 
@@ -1056,17 +1056,17 @@ With MUL mixing (`slot = fastRange32((h ^ (h >> 32)) × hp, n)`), the collision 
 | | Rust PTRHash | StreamHash |
 |---|---|---|
 | Pilot hash | `C × (pilot ^ seed)` | SplitMix64 finalizer on `C × (pilot ^ seed)`, then `| 1` |
-| Effectively independent pilots (measured) | ~3–5 out of 256 | ~253–259 out of 256 |
+| Independent trials (measured) | ~3–5 out of 256 | ~253–259 out of 256 |
 
-**Why:** When pilots are correlated, many pilot values attempt essentially the same hash assignments, wasting attempts and increasing build failure probability. With the SplitMix64 finalizer, effectively all 256 pilots produce independent hash patterns. Over 10,000 random key sets, ~253–259 pilots behave independently with SplitMix64, compared to 180–225 without. At 1T keys (~31.6M blocks):
+**Why:** When pilots are correlated, many pilot values attempt essentially the same hash assignments, wasting attempts and increasing build failure probability. With the SplitMix64 finalizer, all 256 pilots produce independent hash patterns. Over 10,000 random key sets, ~253–259 pilots behave independently with SplitMix64, compared to 180–225 without. At 1T keys (~31.6M blocks):
 - **Without SplitMix64:** ~1 in 30 builds fails
 - **With SplitMix64:** ~1 in 7,200 builds fails
 
-*Note on estimation:* The effectively independent pilot count can be estimated by fitting observed per-bucket failure rates to the model P(all 256 pilots fail) = (1 − p)^K, where p is the single-pilot success probability for the largest bucket and K is the effective count.
+*Note on estimation:* The number of independent trials can be estimated by fitting observed per-bucket failure rates to the model P(all 256 pilots fail) = (1 − p)^K, where p is the single-pilot success probability for the largest bucket and K is the number of independent trials.
 
 The `| 1` in PilotHash (§6.3) ensures the result is odd (bijective multiplication mod 2^64) and prevents `hp = 0`.
 
-**How Rust compensates:** The Rust implementation uses the Vigna formula to compute very large part sizes (~millions of keys per part). At that scale, even with only a few effectively independent pilots, individual bucket failure probabilities are extremely small relative to the slot pool. StreamHash's small blocks (31,600 keys) require high pilot independence.
+**How Rust compensates:** The Rust implementation uses the Vigna formula to compute very large part sizes (~millions of keys per part). At that scale, even with only a few independent trials, individual bucket failure probabilities are extremely small relative to the slot pool. StreamHash's small blocks (31,600 keys) require high pilot independence.
 
 ### 6.12. Divergence: Block Sizing — Fixed 10K Buckets instead of Dynamic Vigna Formula
 
