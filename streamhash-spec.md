@@ -935,7 +935,7 @@ unified hybrid extraction strategy using a mixer over both k0 and k1.
 
 ### 7.1. Overview
 
-StreamHash's PTRHash adaptation is based on PtrHash by [Groot Koerkamp](https://github.com/RagnarGrootKoerkamp/PtrHash) ([paper](https://arxiv.org/abs/2502.15539)), with several modifications for streaming construction (see §7.9–§7.14).
+StreamHash's PTRHash adaptation is based on PtrHash by [Groot Koerkamp](https://github.com/RagnarGrootKoerkamp/PtrHash) ([paper](https://arxiv.org/abs/2502.15539)), with several modifications for streaming construction (see §7.9–§7.13).
 
 PTRHash is normally built as a monolithic O(N)-RAM structure over millions of keys per part. StreamHash adapts it for streaming construction with small, fixed-size blocks (~31,600 keys each), enabling bounded-RAM builds while preserving PTRHash's O(1) query performance.
 
@@ -1078,7 +1078,7 @@ function QuerySlotPTRHash(k0, k1, metadata, keysInBlock) → localSlot:
 Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.6 for the
 unified hybrid extraction strategy using a mixer over both k0 and k1.
 
-### PTRHash Divergence Summary (§7.9–§7.14)
+### PTRHash Divergence Summary (§7.9–§7.13)
 
 The following subsections provide detailed reference and comparison for where StreamHash's PTRHash adaptation diverges from the Rust PtrHash implementation by Groot Koerkamp. Each divergence is cross-referenced from the relevant algorithm section above and is motivated by StreamHash's small, fixed-size blocks (~31,600 keys) — substantially smaller than the Rust implementation's dynamic part sizes (millions of keys). At this smaller scale, several aspects of the original design (XOR mixing, 64-bit slot input, simple pilot hashing) become unreliable, requiring the modifications described below.
 
@@ -1146,14 +1146,6 @@ The tradeoff: small blocks have higher per-block failure probability, requiring 
 | Key processing | Hash full key upfront | Use bytes 0-15 directly (k0, k1 as little-endian uint64s) |
 
 **Why:** The caller is required to provide uniformly random input (or pre-hash). Given that guarantee, the first 16 bytes provide sufficient entropy for both routing and slot computation. This eliminates a full-key hash in the build/query hot path.
-
-### 7.14. Divergence: Fingerprint Extraction — Unified Mixer
-
-| | Rust PTRHash | StreamHash |
-|---|---|---|
-| Fingerprint source | N/A (no fingerprint support) | Unified mixer: trailing bytes for keys >16B, `(k0 ^ (k1 × C)) >> 32` for 16B keys |
-
-**Why:** For 16-byte keys, extracting from a single hash half creates a fragile dependency on which half is "safe" for each algorithm. The mixer `k0 ^ (k1 × 0x517cc1b727220a95)` combines both halves, making extraction algorithm-independent. High bits (>> 32) are used because block assignment constrains k0's low byte via the BigEndian prefix. See §2.6 for the full design rationale.
 
 ---
 
