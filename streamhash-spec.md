@@ -890,7 +890,7 @@ The adaptation uses CubicEps bucket distribution (a skewed assignment that creat
 - **Largest bucket:** Due to CubicEps skew, bucket 0 gets ~1.08% of keys = ~341 keys
 - **Pilot search:** Each bucket tries up to 256 pilots to find collision-free slot assignments
 
-**Why 10,000 buckets per block?** See §6.12 for the full rationale. In brief: streaming construction requires small, fixed-size blocks. The CubicEps distribution creates a heavy-tailed largest bucket (~1.08% of keys). At 10K buckets per block (~31,600 keys), the largest bucket is ~341 keys, giving a per-block failure probability of ~4.4×10⁻¹². This figure is derived from the cuckoo placement analysis in the PtrHash paper applied to bucket 0: each of K_eff ≈ 256 independent pilots is an independent trial, so P(block fails) ≈ (1 − p)^256 where p is the single-pilot success probability for the ~341-key bucket. At 1T keys (~31.6M blocks), the expected build failure rate is 31.6M × 4.4×10⁻¹² ≈ 1/7,200.
+**Why 10,000 buckets per block?** See §6.12 for the full rationale. In brief: streaming construction requires small, fixed-size blocks. The CubicEps distribution creates a heavy-tailed largest bucket (~1.08% of keys). At 10K buckets per block (~31,600 keys), the largest bucket is ~341 keys, giving a per-block failure probability of ~4.4×10⁻¹². This figure is derived from the cuckoo placement analysis in the PtrHash paper applied to bucket 0: we try up to 256 pilots, and the pilots behave as approximately independent trials (≈256 independent attempts), so P(block fails) ≈ (1 − p)^256 where p is the single-pilot success probability for the ~341-key bucket. At 1T keys (~31.6M blocks), the expected build failure rate is 31.6M × 4.4×10⁻¹² ≈ 1/7,200.
 
 **Why ~341 keys in bucket 0?** Due to the cubic CDF shape, bucket 0 captures a disproportionate share of keys. Empirically measured: ~1.08% of keys → ~341 keys for a 31,600-key block.
 
@@ -1038,9 +1038,9 @@ The following subsections provide detailed reference and comparison for where St
 
 **Why XOR mixing fails:**
 
-With XOR mixing (`slot = fastRange32(h ^ hp, n)`), collision *pairs* are pilot-invariant: if `fastRange32(h₁ ^ hp, n) == fastRange32(h₂ ^ hp, n)` for one pilot, the relationship `h₁ ^ hp` vs `h₂ ^ hp` is structurally similar across pilots. However, the slot *assignments* do change per pilot — which is why K_eff is 3-5 (not 1). The correlation is partial but severe enough to make large buckets (~341 keys) unsolvable with only 256 pilots.
+With XOR mixing (`slot = fastRange32(h ^ hp, n)`), collision *pairs* are pilot-invariant: if `fastRange32(h₁ ^ hp, n) == fastRange32(h₂ ^ hp, n)` for one pilot, the relationship `h₁ ^ hp` vs `h₂ ^ hp` is structurally similar across pilots. However, the slot *assignments* do change per pilot — which is why the 256 pilots behave like only 3-5 truly independent trials (not 256). The correlation is partial but severe enough to make large buckets (~341 keys) unsolvable with only 256 pilots.
 
-With MUL mixing (`slot = fastRange32((h ^ (h >> 32)) × hp, n)`), the collision condition depends on hp non-linearly. Different pilots see different collision structures, making them approximately independent trials (K_eff ≈ 256).
+With MUL mixing (`slot = fastRange32((h ^ (h >> 32)) × hp, n)`), the collision condition depends on hp non-linearly. Different pilots see different collision structures, making them approximately independent trials (≈256 independent attempts).
 
 ### 6.10. Divergence: Slot Input — k0^k1 instead of hx.low()
 
