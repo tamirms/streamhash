@@ -35,9 +35,6 @@ type Index struct {
 	// Parsed header
 	header *header
 
-	// Footer (for verification)
-	footer *footer
-
 	// Variable-length data from file
 	userMetadata []byte
 
@@ -68,86 +65,111 @@ type Stats struct {
 }
 
 // Open opens a StreamHash index file for querying.
+// It opens the file, memory-maps it, and closes the file descriptor.
 func Open(path string) (*Index, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open index file: %w", err)
 	}
+	defer file.Close()
+	return OpenFile(file)
+}
 
-	// Get file size
-	stat, err := file.Stat()
+// OpenFile opens a StreamHash index by memory-mapping the given file.
+// The caller is responsible for closing f. Per POSIX mmap(2), f may be
+// closed immediately after OpenFile returns.
+func OpenFile(f *os.File) (*Index, error) {
+	stat, err := f.Stat()
 	if err != nil {
-		primaryErr := fmt.Errorf("stat index file: %w", err)
-		return nil, errors.Join(primaryErr, file.Close())
+		return nil, fmt.Errorf("stat index file: %w", err)
 	}
 	fileSize := stat.Size()
 
 	if fileSize < int64(minFileSize) {
-		return nil, errors.Join(streamerrors.ErrTruncatedFile, file.Close())
+		return nil, streamerrors.ErrTruncatedFile
 	}
 
-	// Memory map the file
-	mm, err := mmap.Map(file, mmap.RDONLY, 0)
+	mm, err := mmap.Map(f, mmap.RDONLY, 0)
 	if err != nil {
-		primaryErr := fmt.Errorf("mmap index file: %w", err)
-		return nil, errors.Join(primaryErr, file.Close())
-	}
-	// Safe to close file immediately after mmap - the mapping holds its own reference.
-	// Per POSIX mmap(2): "After the mmap() call has returned, the file descriptor
-	// can be closed immediately without invalidating the mapping."
-	if err := file.Close(); err != nil {
-		primaryErr := fmt.Errorf("failed to close file after mmap: %w", err)
-		return nil, errors.Join(primaryErr, mm.Unmap())
+		return nil, fmt.Errorf("mmap index file: %w", err)
 	}
 
 	idx := &Index{
 		mmap: mm,
 		data: []byte(mm),
 	}
-
-	// Parse header
-	header, err := decodeHeader(idx.data[:headerSize])
-	if err != nil {
+	if err := idx.initFromData(); err != nil {
 		return nil, errors.Join(err, idx.Close())
 	}
-	idx.header = header
+	return idx, nil
+}
+
+// OpenBytes creates a StreamHash index from an in-memory byte slice.
+// No file is opened or memory-mapped; Close is a no-op.
+// The caller must ensure data is not modified while the Index is in use.
+func OpenBytes(data []byte) (*Index, error) {
+	if len(data) < minFileSize {
+		return nil, streamerrors.ErrTruncatedFile
+	}
+	idx := &Index{
+		data: data,
+	}
+	if err := idx.initFromData(); err != nil {
+		return nil, err
+	}
+	return idx, nil
+}
+
+// initFromData parses header, variable sections, and RAM index from idx.data.
+// Footer decoding is deferred to Verify() — Open() only touches the
+// contiguous prefix (header + variable sections + RAM index).
+func (idx *Index) initFromData() error {
+	fileSize := uint64(len(idx.data))
+
+	// Parse header
+	hdr, err := decodeHeader(idx.data[:headerSize])
+	if err != nil {
+		return err
+	}
+	idx.header = hdr
 
 	// Read variable-length sections after header
 	// Layout: [Header 64B][UserMetaLen 4B][UserMeta][AlgoConfigLen 4B][AlgoConfig][RAM Index]...
 	offset := uint64(headerSize)
 
 	// Read userMetadata
-	if offset+4 > uint64(fileSize) {
-		return nil, errors.Join(streamerrors.ErrTruncatedFile, idx.Close())
+	if offset+4 > fileSize {
+		return streamerrors.ErrTruncatedFile
 	}
 	userMetadataLen := binary.LittleEndian.Uint32(idx.data[offset:])
 	offset += 4
-	if offset+uint64(userMetadataLen) > uint64(fileSize) {
-		return nil, errors.Join(streamerrors.ErrTruncatedFile, idx.Close())
+	if offset+uint64(userMetadataLen) > fileSize {
+		return streamerrors.ErrTruncatedFile
 	}
 	idx.userMetadata = idx.data[offset : offset+uint64(userMetadataLen)]
 	offset += uint64(userMetadataLen)
 
 	// Read algoConfig
-	if offset+4 > uint64(fileSize) {
-		return nil, errors.Join(streamerrors.ErrTruncatedFile, idx.Close())
+	if offset+4 > fileSize {
+		return streamerrors.ErrTruncatedFile
 	}
 	algoConfigLen := binary.LittleEndian.Uint32(idx.data[offset:])
 	offset += 4
-	if offset+uint64(algoConfigLen) > uint64(fileSize) {
-		return nil, errors.Join(streamerrors.ErrTruncatedFile, idx.Close())
+	if offset+uint64(algoConfigLen) > fileSize {
+		return streamerrors.ErrTruncatedFile
 	}
 	algoConfig := idx.data[offset : offset+uint64(algoConfigLen)]
 	offset += uint64(algoConfigLen)
 
 	// Calculate RAM index position (after variable sections)
-	numRAMEntries := header.NumBlocks + 1 // includes sentinel
+	numRAMEntries := hdr.NumBlocks + 1 // includes sentinel
 	ramIndexStart := offset
 	ramIndexSize := uint64(numRAMEntries) * uint64(ramIndexEntrySize)
 	ramIndexEnd := ramIndexStart + ramIndexSize
 
-	if ramIndexEnd > uint64(fileSize)-uint64(footerSize) {
-		return nil, errors.Join(streamerrors.ErrCorruptedIndex, idx.Close())
+	// fileSize >= minFileSize > footerSize, so no underflow.
+	if ramIndexEnd > fileSize-uint64(footerSize) {
+		return streamerrors.ErrCorruptedIndex
 	}
 
 	// Load RAM index
@@ -157,27 +179,20 @@ func Open(path string) (*Index, error) {
 		idx.ramIndex[i] = decodeRAMIndexEntry(idx.data[entryOffset : entryOffset+uint64(ramIndexEntrySize)])
 	}
 
-	idx.entrySize = header.entrySize()
+	idx.entrySize = hdr.entrySize()
 
 	// Compute separated layout region offsets
 	idx.payloadRegionOffset = ramIndexEnd
-	payloadRegionSize := header.TotalKeys * uint64(idx.entrySize)
+	payloadRegionSize := hdr.TotalKeys * uint64(idx.entrySize)
 	idx.metadataRegionOffset = idx.payloadRegionOffset + payloadRegionSize
 
 	// Create algorithm decoder for query-time slot computation
-	idx.decoder, err = newBlockDecoder(header.BlockAlgorithm, algoConfig, header.Seed)
+	idx.decoder, err = newBlockDecoder(hdr.BlockAlgorithm, algoConfig, hdr.Seed)
 	if err != nil {
-		return nil, errors.Join(err, idx.Close())
+		return err
 	}
 
-	// Parse footer
-	footer, err := decodeFooter(idx.data[fileSize-footerSize:])
-	if err != nil {
-		return nil, errors.Join(err, idx.Close())
-	}
-	idx.footer = footer
-
-	return idx, nil
+	return nil
 }
 
 // Close closes the index and releases resources.
@@ -396,11 +411,21 @@ func (idx *Index) Stats() *Stats {
 // 1. PayloadRegionHash (hash-of-hashes: H(H(b0) || H(b1) || ...))
 // 2. MetadataRegionHash (streaming hash of metadata region)
 //
+// The footer (last 32 bytes) is decoded on each Verify call rather than at Open time,
+// so Open() only touches the contiguous prefix and avoids a scattered page fault.
+//
 // The hash-of-hashes approach matches the streaming hash computation during build,
 // where workers compute per-block payload hashes that are folded in order.
 func (idx *Index) Verify() error {
 	if idx.closed.Load() {
 		return streamerrors.ErrIndexClosed
+	}
+
+	// Lazy footer decode — only touched by Verify, not Open.
+	fileSize := uint64(len(idx.data))
+	ft, err := decodeFooter(idx.data[fileSize-footerSize:])
+	if err != nil {
+		return err
 	}
 
 	numBlocks := int(idx.header.NumBlocks)
@@ -440,12 +465,12 @@ func (idx *Index) Verify() error {
 		}
 	}
 
-	if payloadHasher.Sum64() != idx.footer.PayloadRegionHash {
+	if payloadHasher.Sum64() != ft.PayloadRegionHash {
 		return streamerrors.ErrChecksumFailed
 	}
 
 	// Verify metadata region hash (streaming hash of entire region)
-	footerOffset := uint64(len(idx.data)) - footerSize
+	footerOffset := fileSize - footerSize
 	if footerOffset < idx.metadataRegionOffset {
 		return streamerrors.ErrCorruptedIndex
 	}
@@ -453,7 +478,7 @@ func (idx *Index) Verify() error {
 	if metadataRegionSize > 0 {
 		metadataRegion := idx.data[idx.metadataRegionOffset:footerOffset]
 		actualMetaHash := xxhash.Sum64(metadataRegion)
-		if actualMetaHash != idx.footer.MetadataRegionHash {
+		if actualMetaHash != ft.MetadataRegionHash {
 			return streamerrors.ErrChecksumFailed
 		}
 	}
