@@ -126,18 +126,25 @@ func (b *Builder) addKeyParallel(k0, k1 uint64, payload uint64, fingerprint uint
 	return nil
 }
 
-// dispatchBlock sends the pending block to workers for building.
+// dispatchBlock sends the pending block to workers for building (sorted mode).
+// Wraps dispatchBlockWork with pendingEntries management.
 func (b *Builder) dispatchBlock() error {
+	entries := b.pendingEntries
+	b.pendingEntries = b.getEntrySlice()
+	return b.dispatchBlockWork(b.currentBlockIdx, entries)
+}
+
+// dispatchBlockWork sends a block with explicit parameters to workers for building.
+// Maintains keysBefore as a running accumulator for payload offset calculation.
+// Used by both sorted mode (via dispatchBlock) and unsorted mode directly.
+func (b *Builder) dispatchBlockWork(blockID uint32, entries []routedEntry) error {
 	work := blockWork{
-		blockID:    b.currentBlockIdx,
-		entries:    b.pendingEntries,
+		blockID:    blockID,
+		entries:    entries,
 		keysBefore: b.keysBefore,
 	}
-
-	// Get new slice for next block
-	b.pendingEntries = b.getEntrySlice()
-	b.keysBefore += uint64(len(work.entries))
-	b.nextBlockToWrite++
+	b.keysBefore += uint64(len(entries))
+	b.nextBlockToWrite = blockID + 1
 
 	select {
 	case b.workChan <- work:

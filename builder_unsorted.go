@@ -17,22 +17,35 @@ const (
 	// we allocate μ + k*√μ slots where k = unsortedMarginSigmas.
 	// 7 sigmas provides ~10^-12 overflow probability per block (Q(7) ≈ 1.28×10^-12).
 	unsortedMarginSigmas = 7.0
+
+	// defaultWriteBufferBytes is the total memory budget for per-block write buffers.
+	// Entries are buffered in memory per-block and flushed sequentially to the mmap
+	// when a block's buffer fills. This converts scattered random mmap writes into
+	// sequential burst writes, improving cache/TLB locality.
+	defaultWriteBufferBytes = 16 << 20 // 16MB
 )
 
 // unsortedBuffer encapsulates the temp file, mmap, and per-block counters
-// used to buffer entries in unsorted mode. Entries are written in arrival
-// order within each block's region and later read back in block order
-// for replay through the sorted pipeline.
+// used to buffer entries in unsorted mode. Entries are buffered in memory
+// per-block and flushed to the mmap when a block's buffer fills, converting
+// scattered random writes into sequential burst writes. Entries are later
+// read back in block order for building.
 type unsortedBuffer struct {
 	tempFile       *os.File
 	tempData       []byte
 	tempPath       string
-	counter        []uint32
+	counter        []uint32 // flushed entries per block (written to mmap)
 	regionSize     uint64
 	regionCapacity uint32
 	entrySize      int
 	cfg            *buildConfig
 	numBlocks      uint32
+
+	// Per-block write buffers: entries are accumulated here before flushing
+	// sequentially to the mmap region. Total entries for a block =
+	// counter[blockID] + len(writeBuffers[blockID]).
+	writeBuffers   [][]routedEntry
+	flushThreshold int // entries per block before flush
 }
 
 // newUnsortedBuffer creates an unsortedBuffer with mmap'd temp file.
@@ -86,8 +99,22 @@ func newUnsortedBuffer(cfg *buildConfig, numBlocks uint32) (*unsortedBuffer, err
 	// Hint for random write pattern during routing phase
 	_ = unix.Madvise(u.tempData, unix.MADV_RANDOM)
 
+	// Request transparent huge pages (must precede prefault for 2MB direct allocation)
+	hintHugePages(u.tempData)
+	// Pre-fault all pages to eliminate minor faults during AddKey writes
+	prefaultRegion(u.tempData)
+
 	// Allocate counter array
 	u.counter = make([]uint32, numBlocks)
+
+	// Initialize per-block write buffers.
+	// Budget is in terms of routedEntry structs (32 bytes each: 3×uint64 + uint32 + padding).
+	const routedEntrySize = 32
+	u.flushThreshold = max(1, defaultWriteBufferBytes/(int(numBlocks)*routedEntrySize))
+	u.writeBuffers = make([][]routedEntry, numBlocks)
+	for i := range u.writeBuffers {
+		u.writeBuffers[i] = make([]routedEntry, 0, u.flushThreshold)
+	}
 
 	return u, nil
 }
@@ -132,34 +159,50 @@ func openTmpFile(dir string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), ""), nil
 }
 
-// addKey writes an entry to the temp file in the appropriate block region.
-func (u *unsortedBuffer) addKey(key []byte, k0, k1 uint64, payload uint64, fingerprint uint32, blockID uint32) error {
-	// Bounds check - prevent writing beyond region
-	if u.counter[blockID] >= u.regionCapacity {
-		return fmt.Errorf("%w: block %d has %d entries (capacity %d)",
-			streamerrors.ErrRegionOverflow, blockID, u.counter[blockID], u.regionCapacity)
+// addKey buffers an entry for the given block. When the block's buffer fills,
+// it is flushed sequentially to the mmap region.
+func (u *unsortedBuffer) addKey(k0, k1 uint64, payload uint64, fingerprint uint32, blockID uint32) error {
+	// Early overflow detection: counter (flushed) + buffer (pending) + 1 (this entry)
+	if u.counter[blockID]+uint32(len(u.writeBuffers[blockID]))+1 > u.regionCapacity {
+		return fmt.Errorf("%w: block %d overflow (capacity %d)",
+			streamerrors.ErrRegionOverflow, blockID, u.regionCapacity)
 	}
-
-	// Calculate position in mmap
-	pos := uint64(blockID)*u.regionSize + uint64(u.counter[blockID])*uint64(u.entrySize)
-
-	// Write entry: [key[0:16]][fingerprint][payload]
-	// Copy first 16 bytes of key (k0 and k1 for bucket/slot computation)
-	copy(u.tempData[pos:pos+minKeySize], key[:minKeySize])
-
-	// Write fingerprint (pre-computed using hybrid extraction)
-	if u.cfg.fingerprintSize > 0 {
-		packFingerprintToBytes(u.tempData[pos+minKeySize:], fingerprint, u.cfg.fingerprintSize)
+	u.writeBuffers[blockID] = append(u.writeBuffers[blockID],
+		routedEntry{k0: k0, k1: k1, payload: payload, fingerprint: fingerprint})
+	if len(u.writeBuffers[blockID]) >= u.flushThreshold {
+		u.flushBlock(blockID)
 	}
-
-	// Write payload
-	if u.cfg.payloadSize > 0 {
-		payloadPos := pos + minKeySize + uint64(u.cfg.fingerprintSize)
-		packPayloadToBytes(u.tempData[payloadPos:], payload, u.cfg.payloadSize)
-	}
-
-	u.counter[blockID]++
 	return nil
+}
+
+// flushBlock writes buffered entries sequentially to the block's mmap region.
+func (u *unsortedBuffer) flushBlock(blockID uint32) {
+	buf := u.writeBuffers[blockID]
+	for _, e := range buf {
+		pos := uint64(blockID)*u.regionSize + uint64(u.counter[blockID])*uint64(u.entrySize)
+		binary.LittleEndian.PutUint64(u.tempData[pos:], e.k0)
+		binary.LittleEndian.PutUint64(u.tempData[pos+8:], e.k1)
+		if u.cfg.fingerprintSize > 0 {
+			packFingerprintToBytes(u.tempData[pos+minKeySize:], e.fingerprint, u.cfg.fingerprintSize)
+		}
+		if u.cfg.payloadSize > 0 {
+			packPayloadToBytes(u.tempData[pos+minKeySize+uint64(u.cfg.fingerprintSize):],
+				e.payload, u.cfg.payloadSize)
+		}
+		u.counter[blockID]++
+	}
+	u.writeBuffers[blockID] = buf[:0]
+}
+
+// flushAll flushes all non-empty write buffers to the mmap. Called by
+// prepareForRead before the replay phase.
+func (u *unsortedBuffer) flushAll() {
+	for blockID := range u.numBlocks {
+		if len(u.writeBuffers[blockID]) > 0 {
+			u.flushBlock(blockID)
+		}
+	}
+	u.writeBuffers = nil // free buffer memory before replay
 }
 
 // blockCount returns the number of entries stored for the given block.
@@ -199,12 +242,15 @@ func (u *unsortedBuffer) readEntry(blockID, index uint32) routedEntry {
 	}
 }
 
-// prepareForRead resets page state and switches to sequential read hints.
-// Called before the replay phase reads entries in block order.
+// prepareForRead flushes write buffers and switches to sequential read hints.
+// Called before iterating entries in block order.
+//
+// No MADV_DONTNEED: dirty MAP_SHARED pages are already in the page cache from
+// the write phase. MADV_DONTNEED would force the kernel to write them to disk
+// and evict them, then the replay would fault them all back in from disk.
 func (u *unsortedBuffer) prepareForRead() {
-	// NOTE: No msync needed - both phases access same mmap, data visible in page cache
-	_ = unix.Madvise(u.tempData, unix.MADV_DONTNEED)   // Reset page state after random writes
-	_ = unix.Madvise(u.tempData, unix.MADV_SEQUENTIAL) // Enable readahead for sequential scan
+	u.flushAll()
+	_ = unix.Madvise(u.tempData, unix.MADV_SEQUENTIAL)
 }
 
 // cleanup releases all temp file resources. Idempotent: nil-checks all fields
@@ -238,87 +284,119 @@ func (u *unsortedBuffer) cleanup() error {
 	}
 
 	u.counter = nil
+	u.writeBuffers = nil
 
 	return errors.Join(errs...)
 }
 
-// finishUnsorted replays buffered entries through the sorted pipeline
-// (addKeySingleThreaded/addKeyParallel) rather than building blocks directly.
-// This eliminates ~55 lines of duplicated block-building logic and ensures
-// sorted and unsorted modes use identical code paths for block construction,
-// which is validated by TestUnsortedReplay_BitForBitParity.
+// finishUnsorted builds blocks directly from the mmap'd temp file data.
+// Unlike the old replay-through-sorted-pipeline approach, this iterates
+// blocks directly and feeds entries to the block builder (single-threaded)
+// or dispatches block work to parallel workers, sharing the downstream
+// worker infrastructure with sorted mode.
+//
+// Correctness is validated by TestBuildModeEquivalence.
 func (b *Builder) finishUnsorted() error {
 	b.unsortedBuf.prepareForRead()
 
-	// Parallel workers must not be initialized before this point.
-	// NewBuilder skips initParallelWorkers for unsorted mode; we init here.
 	if b.workers > 1 {
-		b.initParallelWorkers()
-		b.pendingEntries = b.getEntrySlice()
+		return b.finishUnsortedParallel()
 	}
+	return b.finishUnsortedSingleThreaded()
+}
 
-	// Explicitly reset sorted pipeline state for replay.
-	// These are already in initial state from construction, but making
-	// the dependency explicit prevents subtle bugs if Builder init changes.
-	b.firstKey = true
-	b.nextBlockToWrite = 0
-	b.keysBefore = 0
-	b.currentBlockIdx = 0
-
-	// Replay entries through sorted pipeline in block order.
-	// INVARIANT: entries are replayed in strictly ascending block order
-	// (0, 1, 2, ...). This is guaranteed by the outer loop structure
-	// and is required for addKeySingleThreaded/addKeyParallel's
-	// block-transition and gap-filling logic to work correctly.
-	replayCounter := 0
+// finishUnsortedSingleThreaded builds blocks directly from mmap data.
+// Iterates all numBlocks blocks (0..numBlocks-1), so no trailing empties
+// are needed — iw.finalize() only adds the sentinel RAM index entry.
+func (b *Builder) finishUnsortedSingleThreaded() error {
 	numBlocks := b.unsortedBuf.numBlocks
 	for blockID := range numBlocks {
-		count := b.unsortedBuf.blockCount(blockID)
-		for i := range count {
-			// Periodic context + writer-error check during replay.
-			// Replay bypasses AddKey, so we check here instead.
-			replayCounter++
-			if replayCounter >= contextCheckInterval {
-				replayCounter = 0
-				select {
-				case <-b.ctx.Done():
-					return errors.Join(b.ctx.Err(), b.unsortedBuf.cleanup(), b.cleanup())
-				default:
-				}
-				if b.workers > 1 && b.writerDone != nil {
-					select {
-					case err := <-b.writerDone:
-						b.writerErr = err
-						return errors.Join(err, b.unsortedBuf.cleanup(), b.cleanup())
-					default:
-					}
-				}
+		// Periodic context check (per-block, not per-entry)
+		if blockID%64 == 0 {
+			select {
+			case <-b.ctx.Done():
+				return errors.Join(b.ctx.Err(), b.unsortedBuf.cleanup(), b.cleanup())
+			default:
 			}
+		}
 
+		count := b.unsortedBuf.blockCount(blockID)
+		if count == 0 {
+			b.commitEmptyBlock()
+			continue
+		}
+		b.builder.Reset()
+		for i := range count {
 			entry := b.unsortedBuf.readEntry(blockID, i)
-			var err error
-			if b.workers > 1 {
-				err = b.addKeyParallel(entry.k0, entry.k1, entry.payload,
-					entry.fingerprint, blockID)
-			} else {
-				err = b.addKeySingleThreaded(entry.k0, entry.k1, entry.payload,
-					entry.fingerprint, blockID)
-			}
-			if err != nil {
-				return errors.Join(err, b.unsortedBuf.cleanup(), b.cleanup())
-			}
+			b.builder.AddKey(entry.k0, entry.k1, entry.payload, entry.fingerprint)
+		}
+		if err := b.buildBlockZeroCopy(); err != nil {
+			return errors.Join(err, b.unsortedBuf.cleanup(), b.cleanup())
 		}
 	}
 
-	// Free temp file resources before finalization
+	// Cleanup temp file, then finalize output
+	if err := b.unsortedBuf.cleanup(); err != nil {
+		return errors.Join(err, b.cleanup())
+	}
+	b.unsortedBuf = nil
+	return b.iw.finalize()
+}
+
+// finishUnsortedParallel dispatches blocks directly to parallel workers.
+// Bulk-reads entries from each block's mmap region into pooled slices,
+// then dispatches via dispatchBlockWork. All numBlocks blocks are dispatched
+// in the loop, so no trailing empties are needed.
+func (b *Builder) finishUnsortedParallel() error {
+	b.initParallelWorkers()
+
+	numBlocks := b.unsortedBuf.numBlocks
+	for blockID := range numBlocks {
+		// Periodic context + writer-error check
+		if blockID%64 == 0 {
+			select {
+			case <-b.ctx.Done():
+				return errors.Join(b.ctx.Err(), b.unsortedBuf.cleanup(), b.cleanup())
+			default:
+			}
+			if b.writerDone != nil {
+				select {
+				case err := <-b.writerDone:
+					b.writerErr = err
+					return errors.Join(err, b.unsortedBuf.cleanup(), b.cleanup())
+				default:
+				}
+			}
+		}
+
+		count := b.unsortedBuf.blockCount(blockID)
+		if count == 0 {
+			if err := b.dispatchEmptyBlock(blockID); err != nil {
+				return errors.Join(err, b.unsortedBuf.cleanup(), b.cleanup())
+			}
+			continue
+		}
+
+		entries := b.getEntrySlice()
+		if cap(entries) < int(count) {
+			b.putEntrySlice(entries)
+			entries = make([]routedEntry, 0, count)
+		}
+		for i := range count {
+			entries = append(entries, b.unsortedBuf.readEntry(blockID, i))
+		}
+		if err := b.dispatchBlockWork(blockID, entries); err != nil {
+			return errors.Join(err, b.unsortedBuf.cleanup(), b.cleanup())
+		}
+	}
+
+	// Safe to cleanup temp file: all entries have been copied from the mmap
+	// into pooled []routedEntry slices. Workers read from slices, not the mmap.
 	if err := b.unsortedBuf.cleanup(); err != nil {
 		return errors.Join(err, b.cleanup())
 	}
 	b.unsortedBuf = nil
 
-	// Finish via sorted pipeline (handles final block + trailing empties)
-	if b.workers > 1 {
-		return b.finishParallel()
-	}
-	return b.finishSingleThreaded()
+	// Drain pipeline directly — all numBlocks blocks were dispatched, no trailing empties.
+	return b.drainParallelPipeline()
 }

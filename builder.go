@@ -241,7 +241,7 @@ func (b *Builder) AddKey(key []byte, payload uint64) error {
 	fingerprint := b.extractFingerprintHybrid(key, k0, k1)
 
 	if b.unsortedBuf != nil {
-		if err := b.unsortedBuf.addKey(key, k0, k1, payload, fingerprint, blockIdx); err != nil {
+		if err := b.unsortedBuf.addKey(k0, k1, payload, fingerprint, blockIdx); err != nil {
 			return err
 		}
 		// Track key count only after successful add

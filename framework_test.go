@@ -263,11 +263,12 @@ func TestUnsortedBuffer_RoundTrip(t *testing.T) {
 			}
 
 			for _, e := range entries {
-				if err := u.addKey(e.key, e.k0, e.k1, e.payload, e.fingerprint, e.blockID); err != nil {
+				if err := u.addKey(e.k0, e.k1, e.payload, e.fingerprint, e.blockID); err != nil {
 					t.Fatalf("addKey: %v", err)
 				}
 			}
 
+			u.prepareForRead()
 			for _, e := range entries {
 				count := u.blockCount(e.blockID)
 				found := false
@@ -318,12 +319,13 @@ func TestUnsortedBuffer_MultipleBlocks(t *testing.T) {
 		blockID := blockIndexFromPrefix(prefix, numBlocks)
 		payload := uint64(i)
 
-		if err := u.addKey(key, k0, k1, payload, 0, blockID); err != nil {
+		if err := u.addKey(k0, k1, payload, 0, blockID); err != nil {
 			t.Fatalf("addKey: %v", err)
 		}
 		blockEntries[blockID]++
 	}
 
+	u.prepareForRead()
 	for blockID, expectedCount := range blockEntries {
 		got := u.blockCount(blockID)
 		if int(got) != expectedCount {
@@ -375,7 +377,7 @@ func TestUnsortedBuffer_RegionOverflow(t *testing.T) {
 		prefix := extractPrefix(key)
 		blockID := blockIndexFromPrefix(prefix, numBlocks)
 
-		if err := u.addKey(key, k0, k1, uint64(i), 0, blockID); err != nil {
+		if err := u.addKey(k0, k1, uint64(i), 0, blockID); err != nil {
 			t.Fatalf("addKey at %d: %v", i, err)
 		}
 	}
@@ -388,7 +390,7 @@ func TestUnsortedBuffer_RegionOverflow(t *testing.T) {
 	prefix := extractPrefix(key)
 	blockID := blockIndexFromPrefix(prefix, numBlocks)
 
-	err = u.addKey(key, k0, k1, 0, 0, blockID)
+	err = u.addKey(k0, k1, 0, 0, blockID)
 	if !errors.Is(err, streamerrors.ErrRegionOverflow) {
 		t.Errorf("expected ErrRegionOverflow, got: %v", err)
 	}
