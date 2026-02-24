@@ -111,10 +111,6 @@ func newIndexWriter(path string, cfg *buildConfig, numBlocks uint32, algo blockB
 		userMetadata:         cfg.userMetadata,
 	}
 
-	// Prefault the payload region for better parallel write performance.
-	// On Linux 5.14+, uses MADV_POPULATE_WRITE. No-op on other platforms.
-	prefaultRegion(iw.data[payloadRegionOffset:metadataRegionOffset])
-
 	// Initialize header (spec §5.2)
 	// Note: TotalBuckets, BucketsPerBlock, PrefixBits are algorithm-internal
 	// UserMetadata and AlgoConfig are stored in variable-length sections after header
