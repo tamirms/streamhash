@@ -95,7 +95,7 @@ func countingSortBucketsInto(bucketStarts []uint16, result []uint16, counts []in
 
 	// Find max bucket size
 	maxSize := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		size := int(bucketStarts[i+1] - bucketStarts[i])
 		if size > maxSize {
 			maxSize = size
@@ -115,7 +115,7 @@ func countingSortBucketsInto(bucketStarts []uint16, result []uint16, counts []in
 	}
 
 	// Count occurrences of each size
-	for i := 0; i < n; i++ {
+	for i := range n {
 		size := int(bucketStarts[i+1] - bucketStarts[i])
 		counts[size]++
 	}
@@ -128,7 +128,7 @@ func countingSortBucketsInto(bucketStarts []uint16, result []uint16, counts []in
 	}
 
 	// Place buckets in sorted order
-	for i := 0; i < n; i++ {
+	for i := range n {
 		size := int(bucketStarts[i+1] - bucketStarts[i])
 		result[positions[size]] = uint16(i)
 		positions[size]++

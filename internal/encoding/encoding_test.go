@@ -52,7 +52,7 @@ func randomPayload(rng *rand.Rand, payloadSize int) uint64 {
 func randomEntryParams(t *testing.T, rng *rand.Rand) (fpSize, payloadSize int, fp uint32, payload uint64) {
 	t.Helper()
 	for {
-		fpSize = int(rng.IntN(5))     // 0-4
+		fpSize = int(rng.IntN(5))      // 0-4
 		payloadSize = int(rng.IntN(9)) // 0-8
 		entrySize := fpSize + payloadSize
 		if entrySize >= 1 && entrySize <= 12 {
@@ -96,7 +96,7 @@ func TestWriteEntryGenericRoundtrip(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		fpSize, payloadSize, fp, payload := randomEntryParams(t, rng)
 		entrySize := fpSize + payloadSize
 		fpShift := uint(fpSize * 8)
@@ -122,7 +122,7 @@ func TestWriteEntryGenericRoundtrip(t *testing.T) {
 		}
 
 		// Verify no buffer overrun: entry 0 and entry 2 should remain zero
-		for j := 0; j < entrySize; j++ {
+		for j := range entrySize {
 			if buf[j] != 0 {
 				t.Fatalf("iter %d: buffer overrun at buf[%d]=0x%X, want 0", i, j, buf[j])
 			}
@@ -141,7 +141,7 @@ func TestWriteEntrySpecializedParity(t *testing.T) {
 
 	for _, entrySize := range []int{1, 4, 5, 8} {
 		t.Run(fmt.Sprintf("entrySize=%d", entrySize), func(t *testing.T) {
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				// Generate random valid (fpSize, payloadSize) for this entrySize
 				fpSize := int(rng.IntN(min(5, entrySize+1)))
 				payloadSize := entrySize - fpSize
@@ -163,7 +163,7 @@ func TestWriteEntrySpecializedParity(t *testing.T) {
 				WriteEntryGeneric(unsafe.Pointer(&genBuf[0]), pos, entrySize, fp, payload, fpShift)
 
 				offset := pos * entrySize
-				for j := 0; j < entrySize; j++ {
+				for j := range entrySize {
 					if specBuf[offset+j] != genBuf[offset+j] {
 						t.Fatalf("iter %d: parity mismatch at byte %d: entrySize=%d fpSize=%d fp=0x%X payload=0x%X: spec=0x%X gen=0x%X",
 							i, j, entrySize, fpSize, fp, payload, specBuf[offset:offset+entrySize], genBuf[offset:offset+entrySize])
@@ -171,7 +171,7 @@ func TestWriteEntrySpecializedParity(t *testing.T) {
 				}
 
 				// Verify no buffer overrun: entries 0 and 2 should remain zero.
-				for j := 0; j < entrySize; j++ {
+				for j := range entrySize {
 					if specBuf[j] != 0 {
 						t.Fatalf("iter %d: WriteEntry buffer overrun at buf[%d]=0x%X, want 0", i, j, specBuf[j])
 					}

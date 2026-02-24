@@ -136,7 +136,7 @@ func TestDecodeEFRangeInlineDirect(t *testing.T) {
 		if count != 10 {
 			t.Fatalf("Expected count=10, got %d", count)
 		}
-		for i := 0; i < count; i++ {
+		for i := range count {
 			if out[i] != 0 {
 				t.Errorf("out[%d] = %d, want 0", i, out[i])
 			}
@@ -156,7 +156,7 @@ func TestDecodeEFRangeInlineSlowPaths(t *testing.T) {
 		if count != 5 {
 			t.Errorf("expected 5 decoded elements, got %d", count)
 		}
-		for i := 0; i < count; i++ {
+		for i := range count {
 			if out[i] != 3 {
 				t.Errorf("out[%d] = %d, want 3", i, out[i])
 			}
@@ -191,7 +191,7 @@ func TestDecodeEFRangeInlineSlowPaths(t *testing.T) {
 		globalSeed := uint64(testSeed1)
 
 		bb := NewBuilder(uint64(numKeys*2), globalSeed, 0, 0)
-		for i := 0; i < numKeys; i++ {
+		for range numKeys {
 			bb.AddKey(rng.Uint64(), rng.Uint64(), 0, 0)
 		}
 
@@ -350,10 +350,9 @@ func TestQuerySlotErrorPaths(t *testing.T) {
 		// Truncate metadata after checkpoints + EF data but before seed stream.
 		// This triggers the seedStreamOffset >= len(metadata) guard.
 		efSize := eliasFanoSize(bucketsPerBlock, numKeys)
-		truncLen := checkpointsSize + efSize // exactly at seedStreamOffset boundary
-		if truncLen > len(validMeta) {
-			truncLen = len(validMeta)
-		}
+		truncLen := min(
+			// exactly at seedStreamOffset boundary
+			checkpointsSize+efSize, len(validMeta))
 		truncated := make([]byte, truncLen)
 		copy(truncated, validMeta[:truncLen])
 
@@ -370,7 +369,7 @@ func TestQuerySlotErrorPaths(t *testing.T) {
 		// Query with a key whose bucket has 0 keys.
 		gotNotFound := false
 		probeRNG := newTestRNG(t)
-		for probe := uint64(0); probe < 10000; probe++ {
+		for range uint64(10000) {
 			k0 := probeRNG.Uint64()
 			k1 := probeRNG.Uint64()
 			_, err := dec.QuerySlot(k0, k1, validMeta, numKeys)
@@ -391,7 +390,7 @@ func TestLoadWindow64Safe(t *testing.T) {
 
 	t.Run("RandomInputs", func(t *testing.T) {
 		const iterations = 10000
-		for i := 0; i < iterations; i++ {
+		for i := range iterations {
 			dataLen := 1 + rng.IntN(16)
 			data := make([]byte, dataLen)
 			for j := range data {
@@ -454,12 +453,12 @@ func TestLoadWindow64Safe(t *testing.T) {
 func TestDecodeEFRangeVsFullDecode(t *testing.T) {
 	rng := newTestRNG(t)
 
-	for block := 0; block < 30; block++ {
+	for block := range 30 {
 		numKeys := 500 + rng.IntN(2500)
 		globalSeed := testSeed1 ^ uint64(block)
 
 		bb := NewBuilder(uint64(numKeys*2), globalSeed, 0, 0)
-		for i := 0; i < numKeys; i++ {
+		for range numKeys {
 			bb.AddKey(rng.Uint64(), rng.Uint64(), 0, 0)
 		}
 

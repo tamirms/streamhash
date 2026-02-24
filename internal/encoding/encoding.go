@@ -43,7 +43,7 @@ func WriteEntry(basePtr unsafe.Pointer, pos, entrySize int, fp uint32, payload u
 // This is the safe read counterpart to the fp portion of WriteEntry/WriteEntryGeneric.
 func ReadFP(buf []byte, fpSize int) uint32 {
 	var v uint32
-	for i := 0; i < fpSize; i++ {
+	for i := range fpSize {
 		v |= uint32(buf[i]) << (i * 8)
 	}
 	return v
@@ -53,7 +53,7 @@ func ReadFP(buf []byte, fpSize int) uint32 {
 // This is the safe read counterpart to the payload portion of WriteEntry/WriteEntryGeneric.
 func ReadPayload(buf []byte, payloadSize int) uint64 {
 	var v uint64
-	for i := 0; i < payloadSize; i++ {
+	for i := range payloadSize {
 		v |= uint64(buf[i]) << (i * 8)
 	}
 	return v
@@ -89,7 +89,7 @@ func WriteEntryGeneric(basePtr unsafe.Pointer, pos, entrySize int, fp uint32, pa
 	case 4:
 		*(*uint32)(ptr) = fp
 	default:
-		for i := 0; i < fpSize; i++ {
+		for i := range fpSize {
 			*(*uint8)(unsafe.Add(ptr, i)) = uint8(fp >> (i * 8))
 		}
 	}
@@ -105,7 +105,7 @@ func WriteEntryGeneric(basePtr unsafe.Pointer, pos, entrySize int, fp uint32, pa
 	case 8:
 		*(*uint64)(payloadPtr) = payload
 	default:
-		for i := 0; i < payloadSize; i++ {
+		for i := range payloadSize {
 			*(*uint8)(unsafe.Add(payloadPtr, i)) = uint8(payload >> (i * 8))
 		}
 	}

@@ -39,11 +39,11 @@ func TestBuildModeEquivalence(t *testing.T) {
 		{"p4_fp0", 4, 0, 16},
 		{"p0_fp0", 0, 0, 16},
 		{"p4_fp2", 4, 2, 20},
-		{"p4_fp1", 4, 1, 20},  // fp=1 is the default, previously untested
-		{"p4_fp3", 4, 3, 20},  // fp=3 is an untested size
-		{"p1_fp0", 1, 0, 16},  // minimal payload
-		{"p8_fp4", 8, 4, 24},  // maximal payload + fingerprint
-		{"p0_fp2", 0, 2, 20},  // fingerprint-only, no payload
+		{"p4_fp1", 4, 1, 20}, // fp=1 is the default, previously untested
+		{"p4_fp3", 4, 3, 20}, // fp=3 is an untested size
+		{"p1_fp0", 1, 0, 16}, // minimal payload
+		{"p8_fp4", 8, 4, 24}, // maximal payload + fingerprint
+		{"p0_fp2", 0, 2, 20}, // fingerprint-only, no payload
 	}
 
 	numKeys := 5000
@@ -410,7 +410,7 @@ func TestParallelBuilderClose(t *testing.T) {
 		t.Fatalf("NewBuilder failed: %v", err)
 	}
 
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		if err := builder.AddKey(keys[i], 0); err != nil {
 			builder.Close()
 			t.Fatalf("AddKey failed: %v", err)
@@ -443,7 +443,7 @@ func TestParallelBuilderStress(t *testing.T) {
 	for _, alg := range algorithms {
 		t.Run(alg.name, func(t *testing.T) {
 			rng := newTestRNG(t)
-			for cycle := 0; cycle < 10; cycle++ {
+			for cycle := range 10 {
 				tmpDir := t.TempDir()
 				indexPath := filepath.Join(tmpDir, "stress.idx")
 
@@ -491,7 +491,7 @@ func TestParallelBuilderConcurrentBuilds(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, numBuilders)
 
-	for b := 0; b < numBuilders; b++ {
+	for b := range numBuilders {
 		// Generate distinct keys per goroutine from the shared RNG (sequential, before goroutine launch).
 		numKeys := 2000
 		keys := generateRandomKeys(rng, numKeys, 16)
@@ -570,7 +570,7 @@ func TestBuilderCloseIdempotent(t *testing.T) {
 	}
 
 	// Close 3 times, all should succeed
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := builder.Close(); err != nil {
 			t.Errorf("Close() #%d failed: %v", i+1, err)
 		}
@@ -599,7 +599,7 @@ func TestUnsortedReplayCloseAfterFailedFinish(t *testing.T) {
 	}
 
 	rng := newTestRNG(t)
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		key := make([]byte, 16)
 		fillFromRNG(rng, key)
 		if err := builder.AddKey(key, uint64(i)); err != nil {

@@ -9,7 +9,7 @@ func TestBitWriterReset(t *testing.T) {
 	bw := newBitWriterBuffer()
 
 	// Write 100 bits of known data
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		bw.writeBit(1)
 	}
 	if bw.bitsWritten() != 100 {
@@ -199,7 +199,7 @@ func TestBitWriterReaderRandomSequences(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := 10 + rng.IntN(41) // 10-50 pairs
 		values := make([]uint64, n)
 		widths := make([]int, n)
@@ -288,7 +288,7 @@ func TestBitWriterReaderOnes(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := 1 + rng.IntN(200) // 1-200 ones
 		bw := newBitWriterBuffer()
 		bw.writeOnes(n)
@@ -296,7 +296,7 @@ func TestBitWriterReaderOnes(t *testing.T) {
 		data := bw.flush()
 		br := newBitReaderFast(data)
 
-		for j := 0; j < n; j++ {
+		for j := range n {
 			got := br.readBits(1)
 			if got != 1 {
 				t.Fatalf("iter %d: bit[%d]=%d, want 1 (n=%d)", i, j, got, n)
@@ -310,7 +310,7 @@ func TestBitReaderSkipBits(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		bw := newBitWriterBuffer()
 		// Write 3 values with known widths
 		w1, w2, w3 := 8+rng.IntN(20), 8+rng.IntN(20), 8+rng.IntN(20)

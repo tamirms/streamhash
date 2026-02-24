@@ -72,7 +72,7 @@ func TestBucketHeapPopOrder(t *testing.T) {
 
 func TestBucketHeapClearAndReuse(t *testing.T) {
 	h := newBucketHeap(16)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		h.push(i, i+1)
 	}
 	if h.len() != 10 {
@@ -208,7 +208,7 @@ func TestCountingSortOrder(t *testing.T) {
 
 			countingSortBucketsInto(bucketStarts, result, counts, positions)
 
-			for i := 0; i < n; i++ {
+			for i := range n {
 				if result[i] != tc.expect[i] {
 					t.Fatalf("result[%d] = %d, want %d (full result: %v, expect: %v)",
 						i, result[i], tc.expect[i], result[:n], tc.expect)
@@ -223,11 +223,11 @@ func TestCountingSortBucketsInto(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		numBuckets := 10 + int(rng.IntN(9991)) // 10-10000
 		bucketStarts := make([]uint16, numBuckets+1)
 		total := uint16(0)
-		for j := 0; j < numBuckets; j++ {
+		for j := range numBuckets {
 			size := uint16(rng.IntN(16)) // 0-15
 			bucketStarts[j] = total
 			total += size // may wrap around uint16 — that's OK
@@ -284,7 +284,7 @@ func TestBucketHeapConservation(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := 1 + int(rng.IntN(100))
 		h := newBucketHeap(n)
 
@@ -293,7 +293,7 @@ func TestBucketHeapConservation(t *testing.T) {
 			idx, size int
 		}
 		pushed := make([]entry, n)
-		for j := 0; j < n; j++ {
+		for j := range n {
 			idx := j
 			size := int(rng.IntN(20))
 			pushed[j] = entry{idx, size}

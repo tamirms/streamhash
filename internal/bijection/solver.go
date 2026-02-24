@@ -19,7 +19,7 @@ func solveBucket2(bucket []bucketEntry, maxSeed uint32) (uint32, bool) {
 	if p0 == p1 {
 		return 0, true
 	}
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		s0 := mixFromParts(p0, seed, 2)
 		s1 := mixFromParts(p1, seed, 2)
 		if s0 != s1 {
@@ -38,7 +38,7 @@ func solveBucket3(bucket []bucketEntry, maxSeed uint32) (uint32, bool) {
 	if p0 == p1 || p0 == p2 || p1 == p2 {
 		return 0, true
 	}
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		s0 := mixFromParts(p0, seed, 3)
 		s1 := mixFromParts(p1, seed, 3)
 		if s0 == s1 {
@@ -62,7 +62,7 @@ func solveBucket4(bucket []bucketEntry, maxSeed uint32) (uint32, bool) {
 	if p0 == p1 || p0 == p2 || p0 == p3 || p1 == p2 || p1 == p3 || p2 == p3 {
 		return 0, true
 	}
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		s0 := mixFromParts(p0, seed, 4)
 		s1 := mixFromParts(p1, seed, 4)
 		if s0 == s1 {
@@ -90,7 +90,7 @@ func solveBucket5(bucket []bucketEntry, maxSeed uint32) (uint32, bool) {
 		p3 == p4 {
 		return 0, true
 	}
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		s0 := mixFromParts(p0, seed, 5)
 		s1 := mixFromParts(p1, seed, 5)
 		if s0 == s1 {
@@ -123,7 +123,7 @@ func solveBucket6(bucket []bucketEntry, maxSeed uint32) (uint32, bool) {
 		p4 == p5 {
 		return 0, true
 	}
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		s0 := mixFromParts(p0, seed, 6)
 		s1 := mixFromParts(p1, seed, 6)
 		if s0 == s1 {
@@ -154,7 +154,7 @@ func solveBucket7(bucket []bucketEntry, maxSeed uint32) (uint32, bool) {
 	p0, p1, p2, p3 := bucket[0].mixParts, bucket[1].mixParts, bucket[2].mixParts, bucket[3].mixParts
 	p4, p5, p6 := bucket[4].mixParts, bucket[5].mixParts, bucket[6].mixParts
 	// Skip early termination check for size 7: pairwise duplicate detection cost exceeds benefit
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		var occupied uint8
 		s0 := mixFromParts(p0, seed, 7)
 		occupied |= 1 << s0
@@ -196,7 +196,7 @@ func solveBucket8(bucket []bucketEntry, maxSeed uint32) (uint32, bool) {
 	p0, p1, p2, p3 := bucket[0].mixParts, bucket[1].mixParts, bucket[2].mixParts, bucket[3].mixParts
 	p4, p5, p6, p7 := bucket[4].mixParts, bucket[5].mixParts, bucket[6].mixParts, bucket[7].mixParts
 	// Skip early termination check for size 8: pairwise duplicate detection cost exceeds benefit
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		var occupied uint8
 		s0 := mixFromParts(p0, seed, 8)
 		occupied |= 1 << s0
@@ -245,7 +245,7 @@ func solveBucketBitmask(bucket []bucketEntry, size int, maxSeed uint32) (uint32,
 	bucketSize := uint32(size)
 
 	// Use pre-computed mixParts
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		var occupied uint64
 		collision := false
 		for _, entry := range bucket {

@@ -59,7 +59,7 @@ func packPayloadToBytes(dst []byte, payload uint64, size int) {
 	case 8:
 		binary.LittleEndian.PutUint64(dst, payload)
 	default:
-		for i := 0; i < size; i++ {
+		for i := range size {
 			dst[i] = byte(payload >> (i * 8))
 		}
 	}
@@ -76,7 +76,7 @@ func unpackPayloadFromBytes(src []byte, size int) uint64 {
 		return binary.LittleEndian.Uint64(src)
 	default:
 		var payload uint64
-		for i := 0; i < size; i++ {
+		for i := range size {
 			payload |= uint64(src[i]) << (i * 8)
 		}
 		return payload

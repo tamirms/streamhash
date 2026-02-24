@@ -272,9 +272,9 @@ func (b *Builder) finishUnsorted() error {
 	// block-transition and gap-filling logic to work correctly.
 	replayCounter := 0
 	numBlocks := b.unsortedBuf.numBlocks
-	for blockID := uint32(0); blockID < numBlocks; blockID++ {
+	for blockID := range numBlocks {
 		count := b.unsortedBuf.blockCount(blockID)
-		for i := uint32(0); i < count; i++ {
+		for i := range count {
 			// Periodic context + writer-error check during replay.
 			// Replay bypasses AddKey, so we check here instead.
 			replayCounter++

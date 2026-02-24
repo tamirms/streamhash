@@ -144,7 +144,7 @@ func (br *bitReaderFast) refill() {
 		br.bytePos += 8
 	} else if remaining > 0 {
 		br.current = 0
-		for i := 0; i < remaining; i++ {
+		for i := range remaining {
 			br.current |= uint64(br.data[br.bytePos+i]) << (i * 8)
 		}
 		br.bytePos += remaining
@@ -230,4 +230,3 @@ func (br *bitReaderFast) readUnaryMax16() uint32 {
 		br.bitPos = 64
 	}
 }
-

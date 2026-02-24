@@ -79,7 +79,7 @@ func TestDecoderQuerySlotRoundTrip(t *testing.T) {
 	keys := make([]keyRecord, numKeys)
 
 	rng := newTestRNG(t)
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		k0 := rng.Uint64()
 		k1 := rng.Uint64()
 		keys[i] = keyRecord{k0, k1}

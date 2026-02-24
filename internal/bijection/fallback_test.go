@@ -36,12 +36,12 @@ func TestVerifyNoFallbackDuplicates(t *testing.T) {
 	rng := newTestRNG(t)
 
 	// Simulate building multiple blocks
-	for block := 0; block < 20; block++ {
+	for block := range 20 {
 		builder.Reset()
 
 		// Add keys to this block (varying sizes up to ~3072, the natural block size)
 		numKeys := 2000 + block*50
-		for i := 0; i < numKeys; i++ {
+		for i := range numKeys {
 			k0 := rng.Uint64()
 			k1 := rng.Uint64()
 			builder.AddKey(k0, k1, uint64(i), 0)
@@ -100,7 +100,7 @@ func TestFallbackListFromMetadata(t *testing.T) {
 			var metadata []byte
 			var globalSeed uint64
 			const maxAttempts = 20
-			for attempt := 0; attempt < maxAttempts; attempt++ {
+			for range maxAttempts {
 				globalSeed = rng.Uint64()
 				builder = NewBuilder(100000, globalSeed, cfg.payloadSize, cfg.fpSize)
 
@@ -172,7 +172,7 @@ func TestFallbackListRoundtrip(t *testing.T) {
 	seedBits := 31 - blockBits
 	seedMask := uint32((1 << seedBits) - 1)
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := 1 + rng.IntN(20)
 		entries := make([]fallbackEntry, n)
 		for j := range entries {

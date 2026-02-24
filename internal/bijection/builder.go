@@ -84,11 +84,11 @@ type Builder struct {
 // encode encodes checkpoints into buf.
 func (cp *checkpoints) encode(buf []byte) {
 	// EFBitPos
-	for i := 0; i < numCheckpoints; i++ {
+	for i := range numCheckpoints {
 		binary.LittleEndian.PutUint16(buf[i*2:], cp.efBitPos[i])
 	}
 	// SeedBitPos
-	for i := 0; i < numCheckpoints; i++ {
+	for i := range numCheckpoints {
 		binary.LittleEndian.PutUint16(buf[numCheckpoints*2+i*2:], cp.seedBitPos[i])
 	}
 }
@@ -401,7 +401,7 @@ func (bb *Builder) encodeEFWithCheckpoints(cp *checkpoints, numBuckets int) []by
 
 	lowBits := computeEFLowBits(numBuckets, bb.keysInBlock)
 
-	for checkpointIdx := 0; checkpointIdx < numCheckpoints; checkpointIdx++ {
+	for checkpointIdx := range numCheckpoints {
 		bucketIdx := (checkpointIdx + 1) * checkpointInterval
 		if bucketIdx > numBuckets {
 			break
@@ -413,10 +413,7 @@ func (bb *Builder) encodeEFWithCheckpoints(cp *checkpoints, numBuckets int) []by
 			highPart = int(prevCumulative) >> lowBits
 		}
 
-		bitPos := bucketIdx + highPart
-		if bitPos > math.MaxUint16 {
-			bitPos = math.MaxUint16
-		}
+		bitPos := min(bucketIdx+highPart, math.MaxUint16)
 		cp.efBitPos[checkpointIdx] = uint16(bitPos)
 	}
 
@@ -425,7 +422,7 @@ func (bb *Builder) encodeEFWithCheckpoints(cp *checkpoints, numBuckets int) []by
 
 // encodeSeedsWithCheckpoints encodes seeds and computes checkpoints.
 func (bb *Builder) encodeSeedsWithCheckpoints(cp *checkpoints, numBuckets int) error {
-	for bucketIdx := 0; bucketIdx < numBuckets; bucketIdx++ {
+	for bucketIdx := range numBuckets {
 		if bucketIdx > 0 && bucketIdx%checkpointInterval == 0 {
 			checkpointIdx := bucketIdx/checkpointInterval - 1
 			if checkpointIdx < numCheckpoints {

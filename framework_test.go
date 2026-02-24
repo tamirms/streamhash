@@ -137,7 +137,7 @@ func TestBlockIndexConsistency(t *testing.T) {
 	}
 
 	rng := newTestRNG(t)
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		prefix := rng.Uint64()
 		blockIdx := blockIndexFromPrefix(prefix, numBlocks)
 
@@ -158,7 +158,7 @@ func TestBlockOrderWithExtractPrefix(t *testing.T) {
 	rng := newTestRNG(t)
 	keys := make([][32]byte, numKeys)
 	for i := range keys {
-		for j := 0; j < 4; j++ {
+		for j := range 4 {
 			binary.LittleEndian.PutUint64(keys[i][j*8:], rng.Uint64())
 		}
 	}
@@ -241,7 +241,7 @@ func TestUnsortedBuffer_RoundTrip(t *testing.T) {
 				blockID     uint32
 			}
 			var entries []testEntry
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				key := make([]byte, 16)
 				binary.LittleEndian.PutUint64(key[0:8], rng.Uint64())
 				binary.LittleEndian.PutUint64(key[8:16], rng.Uint64())
@@ -271,7 +271,7 @@ func TestUnsortedBuffer_RoundTrip(t *testing.T) {
 			for _, e := range entries {
 				count := u.blockCount(e.blockID)
 				found := false
-				for i := uint32(0); i < count; i++ {
+				for i := range count {
 					got := u.readEntry(e.blockID, i)
 					if got.k0 == e.k0 && got.k1 == e.k1 {
 						if got.payload != e.payload {
@@ -308,7 +308,7 @@ func TestUnsortedBuffer_MultipleBlocks(t *testing.T) {
 	rng := newTestRNG(t)
 	blockEntries := make(map[uint32]int)
 
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		key := make([]byte, 16)
 		binary.LittleEndian.PutUint64(key[0:8], rng.Uint64())
 		binary.LittleEndian.PutUint64(key[8:16], rng.Uint64())
@@ -345,7 +345,7 @@ func TestUnsortedBuffer_EmptyBlocks(t *testing.T) {
 	}
 	defer u.cleanup()
 
-	for blockID := uint32(0); blockID < numBlocks; blockID++ {
+	for blockID := range numBlocks {
 		if got := u.blockCount(blockID); got != 0 {
 			t.Errorf("block %d: expected count 0, got %d", blockID, got)
 		}
@@ -524,7 +524,7 @@ func TestDispatchEmptyBlockDirect(t *testing.T) {
 		cancel()
 
 		var lastErr error
-		for i := uint32(0); i < 200; i++ {
+		for i := range uint32(200) {
 			err = builder.dispatchEmptyBlock(i)
 			if err != nil {
 				lastErr = err
@@ -547,7 +547,7 @@ func TestDispatchEmptyBlockDirect(t *testing.T) {
 			t.Fatalf("NewBuilder failed: %v", err)
 		}
 
-		for i := uint32(0); i < 10; i++ {
+		for i := range uint32(10) {
 			err = builder.dispatchEmptyBlock(i)
 			if err != nil {
 				t.Errorf("dispatchEmptyBlock failed: %v", err)
@@ -723,7 +723,7 @@ func TestPreHashUniqueness(t *testing.T) {
 	hashes := make(map[string]bool)
 
 	rng := newTestRNG(t)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := make([]byte, 8)
 		fillFromRNG(rng, key)
 
@@ -814,7 +814,7 @@ func TestRAMIndexEntryRoundtrip(t *testing.T) {
 
 	buf := make([]byte, ramIndexEntrySize)
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		e := ramIndexEntry{
 			KeysBefore:     rng.Uint64() & mask40,
 			MetadataOffset: rng.Uint64() & mask40,
@@ -840,14 +840,14 @@ func TestHeaderRoundtrip(t *testing.T) {
 
 	buf := make([]byte, headerSize)
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		h := header{
 			Magic:           magic,
 			Version:         version,
 			TotalKeys:       rng.Uint64(),
 			NumBlocks:       uint32(rng.IntN(10000-2)) + 2, // [2, 10000)
 			RAMBits:         rng.Uint32(),
-			PayloadSize:     uint32(rng.IntN(int(maxPayloadSize) + 1)), // [0, 8]
+			PayloadSize:     uint32(rng.IntN(int(maxPayloadSize) + 1)),    // [0, 8]
 			FingerprintSize: uint8(rng.IntN(int(maxFingerprintSize) + 1)), // [0, 4]
 			Seed:            rng.Uint64(),
 			BlockAlgorithm:  BlockAlgorithmID(rng.IntN(2)), // 0 or 1
@@ -899,7 +899,7 @@ func TestFingerprintPackUnpack(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 10000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		fpSize := int(rng.IntN(5)) // 0-4
 		if fpSize == 0 {
 			// fpSize=0 -> unpack returns 0
@@ -951,7 +951,7 @@ func TestPayloadPackUnpack(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 10000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		payloadSize := int(rng.IntN(8)) + 1 // 1-8
 
 		var mask uint64
@@ -1036,7 +1036,7 @@ func TestExtractFingerprintBijectivity(t *testing.T) {
 	k0 := uint64(0xDEADBEEFCAFEBABE)
 	seen := make(map[uint32]bool)
 
-	for k1 := uint64(0); k1 < 1000; k1++ {
+	for k1 := range uint64(1000) {
 		// Verify extractFingerprint matches manual computation
 		fp := extractFingerprint(k0, k1, 4)
 		h := k0 ^ (k1 * fingerprintMixer)
@@ -1060,7 +1060,7 @@ func TestExtractFingerprintK0Sensitivity(t *testing.T) {
 	seen := make(map[uint32]bool)
 
 	rng := newTestRNG(t)
-	for i := uint64(0); i < 1000; i++ {
+	for range uint64(1000) {
 		k0 := rng.Uint64()
 		fp := extractFingerprint(k0, k1, fpSize)
 		if seen[fp] {
@@ -1179,7 +1179,7 @@ func TestStatsFields(t *testing.T) {
 func TestFooterRoundtrip(t *testing.T) {
 	rng := newTestRNG(t)
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		original := footer{
 			PayloadRegionHash:  rng.Uint64(),
 			MetadataRegionHash: rng.Uint64(),

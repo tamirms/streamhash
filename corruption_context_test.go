@@ -140,7 +140,7 @@ func TestCorruptionDetection(t *testing.T) {
 				defer idx.Close()
 
 				queryErrors := 0
-				for i := 0; i < 100; i++ {
+				for i := range 100 {
 					if _, err := idx.Query(keys[i%numKeys]); err != nil {
 						queryErrors++
 					}
@@ -306,7 +306,7 @@ func TestContextCancellation(t *testing.T) {
 				}
 
 				rng := newTestRNG(t)
-				for i := 0; i < numKeys; i++ {
+				for i := range numKeys {
 					key := make([]byte, 16)
 					fillFromRNG(rng, key)
 					if err := builder.AddKey(key, uint64(i)); err != nil {
@@ -391,7 +391,7 @@ func TestGoroutineLeaks(t *testing.T) {
 	t.Run("SuccessPath", func(t *testing.T) {
 		initialGoroutines := runtime.NumGoroutine()
 
-		for iter := 0; iter < 5; iter++ {
+		for iter := range 5 {
 			tmpDir := t.TempDir()
 			indexPath := filepath.Join(tmpDir, "leak_test.idx")
 
@@ -435,7 +435,7 @@ func TestGoroutineLeaks(t *testing.T) {
 	t.Run("ErrorPath", func(t *testing.T) {
 		initialGoroutines := runtime.NumGoroutine()
 
-		for iter := 0; iter < 5; iter++ {
+		for iter := range 5 {
 			tmpDir := t.TempDir()
 			indexPath := filepath.Join(tmpDir, "error_leak.idx")
 
@@ -446,7 +446,7 @@ func TestGoroutineLeaks(t *testing.T) {
 				t.Fatalf("NewBuilder failed: %v", err)
 			}
 
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				src := make([]byte, 20)
 				binary.BigEndian.PutUint64(src[0:8], uint64(i+iter*1000))
 				key := PreHash(src)

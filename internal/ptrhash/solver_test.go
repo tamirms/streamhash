@@ -53,7 +53,7 @@ func createSolverWithBuckets(rng *rand.Rand, bucketSizes []int) (*solver, [][]bu
 	buckets := make([][]bucketEntry, len(bucketSizes))
 	for i, size := range bucketSizes {
 		buckets[i] = make([]bucketEntry, size)
-		for j := 0; j < size; j++ {
+		for j := range size {
 			buckets[i][j] = bucketEntry{
 				suffix: rng.Uint64(),
 				k0:     rng.Uint64(),
@@ -69,7 +69,7 @@ func createSolverWithBuckets(rng *rand.Rand, bucketSizes []int) (*solver, [][]bu
 func solveWithRetry(t *testing.T, rng *rand.Rand, s *solver, buckets [][]bucketEntry, numKeys int, maxAttempts int) ([]uint8, []uint16) {
 	t.Helper()
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for range maxAttempts {
 		globalSeed := rng.Uint64()
 		pilotsDst := make([]byte, len(buckets))
 		s.reset(buckets, numKeys, globalSeed, pilotsDst)
@@ -95,7 +95,7 @@ func TestSolverBasic(t *testing.T) {
 	// Create simple test data - one key per bucket with random-like suffix values
 	rng := newTestRNG(t)
 	buckets := make([][]bucketEntry, numBuckets)
-	for i := 0; i < numBuckets; i++ {
+	for i := range numBuckets {
 		buckets[i] = []bucketEntry{{k0: rng.Uint64(), suffix: rng.Uint64()}}
 	}
 
@@ -159,7 +159,7 @@ func TestDuplicateKeyDetection(t *testing.T) {
 			dupRNG := newTestRNG(t)
 			for i, size := range tc.bucketSizes {
 				buckets[i] = make([]bucketEntry, size)
-				for j := 0; j < size; j++ {
+				for j := range size {
 					if i == tc.dupBucket && j < tc.dupCount {
 						// Use the same k0 and suffix for duplicates
 						buckets[i][j] = bucketEntry{k0: 0xCAFEBABE12345678, suffix: 0xDEADBEEFDEADBEEF}
@@ -249,7 +249,7 @@ func TestNoDuplicatesNoError(t *testing.T) {
 	noDupRNG := newTestRNG(t)
 	for i, size := range bucketSizes {
 		buckets[i] = make([]bucketEntry, size)
-		for j := 0; j < size; j++ {
+		for j := range size {
 			buckets[i][j] = bucketEntry{k0: noDupRNG.Uint64(), suffix: noDupRNG.Uint64()}
 		}
 	}
@@ -267,7 +267,7 @@ func TestNoDuplicatesNoError(t *testing.T) {
 
 	// Retry loop like production
 	var err error
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := range 10 {
 		pilotsDst := make([]byte, numBuckets)
 		rs.reset(buckets, numKeys, testGlobalSeed+uint64(attempt), pilotsDst)
 		_, _, err = rs.solve()
@@ -292,7 +292,7 @@ func TestFindFreePilotEquivalence(t *testing.T) {
 
 	for size := 2; size <= 8; size++ {
 		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				// Generate random bucket entries
 				globalSeed := rng.Uint64()
 				entries := make([]bucketEntry, size)
@@ -329,7 +329,7 @@ func TestFindFreePilotEquivalence(t *testing.T) {
 
 				// Mark some random slots as taken on both
 				numTaken := int(rng.IntN(int(numSlots) / 3))
-				for j := 0; j < numTaken; j++ {
+				for range numTaken {
 					slot := uint32(rng.IntN(int(numSlots)))
 					s1.setTaken(slot)
 					s2.setTaken(slot)
@@ -375,7 +375,7 @@ func TestBuildRemapCompleteness(t *testing.T) {
 	const iterations = 10
 	rng := newTestRNG(t)
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		// Create realistic bucket distribution
 		numBuckets := 20 + int(rng.IntN(30))
 		bucketSizes := make([]int, numBuckets)
@@ -426,14 +426,14 @@ func TestGenerationWrapAround(t *testing.T) {
 	rng := newTestRNG(t)
 	s, buckets := createSolverWithBuckets(rng, bucketSizes)
 
-	for reset := 0; reset < 260; reset++ {
+	for reset := range 260 {
 		globalSeed := rng.Uint64()
 		pilotsDst := make([]byte, numBuckets)
 		s.reset(buckets, numKeys, globalSeed, pilotsDst)
 
 		// After reset: no slot should be taken
 		numSlots := computeNumSlots(numKeys)
-		for slot := uint32(0); slot < numSlots; slot++ {
+		for slot := range numSlots {
 			if s.isTaken(slot) {
 				t.Fatalf("reset %d: slot %d falsely taken after reset", reset, slot)
 			}
@@ -469,7 +469,7 @@ func TestGenerationWrapAroundSolve(t *testing.T) {
 	// Solve 270 blocks, forcing generation to wrap past 255.
 	// Verify every successful solve produces valid results.
 	successCount := 0
-	for reset := 0; reset < 270; reset++ {
+	for reset := range 270 {
 		globalSeed := rng.Uint64()
 		pilotsDst := make([]byte, numBuckets)
 		s.reset(buckets, numKeys, globalSeed, pilotsDst)
@@ -521,7 +521,7 @@ func TestSolverPinning(t *testing.T) {
 	s.reset(buckets, numKeys, 42, pilotsDst)
 
 	// Pin pinnedSize buckets
-	for i := 0; i < pinnedSize; i++ {
+	for i := range pinnedSize {
 		s.pin(i)
 		if !s.isPinned(i) {
 			t.Fatalf("bucket %d not pinned after pin()", i)
@@ -529,7 +529,7 @@ func TestSolverPinning(t *testing.T) {
 	}
 
 	// All pinnedSize buckets should be pinned
-	for i := 0; i < pinnedSize; i++ {
+	for i := range pinnedSize {
 		if !s.isPinned(i) {
 			t.Fatalf("bucket %d not pinned (all slots full)", i)
 		}

@@ -55,10 +55,7 @@ func (b *Builder) initParallelWorkers() {
 
 	// Estimate max keys per block for entry pool (2x average with 1024 minimum)
 	avgKeysPerBlock := int(b.cfg.totalKeys / uint64(b.numBlocks))
-	maxKeysPerBlock := avgKeysPerBlock * 2
-	if maxKeysPerBlock < minPoolCapacity {
-		maxKeysPerBlock = minPoolCapacity
-	}
+	maxKeysPerBlock := max(avgKeysPerBlock*2, minPoolCapacity)
 	b.entryPool.New = func() any {
 		return make([]routedEntry, 0, maxKeysPerBlock)
 	}

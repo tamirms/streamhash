@@ -121,9 +121,9 @@ func TestPilotHashAlwaysOddNonZero(t *testing.T) {
 	const iterations = 1000
 
 	// Random global seeds
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		globalSeed := rng.Uint64()
-		for pilot := 0; pilot < numPilotValues; pilot++ {
+		for pilot := range numPilotValues {
 			hp := pilotHash(uint8(pilot), globalSeed)
 			if hp == 0 {
 				t.Fatalf("iter %d: pilotHash(%d, 0x%X) = 0", i, pilot, globalSeed)
@@ -136,7 +136,7 @@ func TestPilotHashAlwaysOddNonZero(t *testing.T) {
 
 	// Explicit critical seeds: 0 and 1 exercise low-entropy inputs to SplitMix64
 	for _, seed := range []uint64{0, 1, 0xdeadbeef, math.MaxUint64} {
-		for pilot := 0; pilot < numPilotValues; pilot++ {
+		for pilot := range numPilotValues {
 			hp := pilotHash(uint8(pilot), seed)
 			if hp == 0 {
 				t.Errorf("pilotHash(%d, 0x%X) = 0", pilot, seed)
@@ -149,7 +149,7 @@ func TestPilotHashAlwaysOddNonZero(t *testing.T) {
 
 	// Matching pilot-and-seed: when pilot value equals seed as uint64,
 	// XOR zeroes out low bits — historically fragile.
-	for pilot := 0; pilot < numPilotValues; pilot++ {
+	for pilot := range numPilotValues {
 		seed := uint64(pilot)
 		hp := pilotHash(uint8(pilot), seed)
 		if hp == 0 {
@@ -170,7 +170,7 @@ func TestCubicEpsBucketDistribution(t *testing.T) {
 	n := 100000
 	counts := make([]int, numBuckets)
 	rng := newTestRNG(t)
-	for i := 0; i < n; i++ {
+	for range n {
 		b := cubicEpsBucket(rng.Uint64(), numBuckets)
 		counts[b]++
 	}
@@ -197,7 +197,7 @@ func TestCubicEpsBucketMonotonicity(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		numBuckets := uint32(rng.Uint32N(math.MaxUint32-1)) + 1
 
 		// Generate 100 sorted x values
@@ -224,7 +224,7 @@ func TestCubicEpsBucketRange(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 10000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		numBuckets := uint32(rng.Uint32N(math.MaxUint32-1)) + 1
 		x := rng.Uint64()
 

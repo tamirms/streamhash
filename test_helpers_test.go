@@ -2,11 +2,11 @@ package streamhash
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
-	"math/rand/v2"
-	"cmp"
 	"fmt"
+	"math/rand/v2"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -35,7 +35,7 @@ func fillFromRNG(rng *rand.Rand, buf []byte) {
 	if tail := len(buf) % 8; tail > 0 {
 		v := rng.Uint64()
 		start := len(buf) - tail
-		for j := 0; j < tail; j++ {
+		for j := range tail {
 			buf[start+j] = byte(v >> (j * 8))
 		}
 	}
@@ -69,7 +69,7 @@ func payloadToUint64(payload []byte) uint64 {
 		return binary.LittleEndian.Uint64(payload)
 	}
 	var result uint64
-	for i := 0; i < len(payload); i++ {
+	for i := range payload {
 		result |= uint64(payload[i]) << (i * 8)
 	}
 	return result
@@ -329,7 +329,7 @@ func createSmallValidIndex(path string) error {
 	numKeys := 100
 
 	keys := make([][]byte, numKeys)
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		src := make([]byte, 20)
 		binary.BigEndian.PutUint64(src[0:8], uint64(i))
 		binary.BigEndian.PutUint64(src[8:16], uint64(i*7919))
@@ -446,7 +446,7 @@ func verifyPayloads(t *testing.T, idx *Index, keys [][]byte, payloads []uint64, 
 func verifyNonMemberRejection(t *testing.T, rng *rand.Rand, idx *Index, numProbes int) {
 	t.Helper()
 	rejected := 0
-	for i := 0; i < numProbes; i++ {
+	for i := range numProbes {
 		nonMember := make([]byte, 24)
 		binary.BigEndian.PutUint64(nonMember[0:8], uint64(0xDEAD000000000000)|uint64(i))
 		fillFromRNG(rng, nonMember[8:])

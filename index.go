@@ -174,7 +174,7 @@ func (idx *Index) initFromData() error {
 
 	// Load RAM index
 	idx.ramIndex = make([]ramIndexEntry, numRAMEntries)
-	for i := uint32(0); i < numRAMEntries; i++ {
+	for i := range numRAMEntries {
 		entryOffset := ramIndexStart + uint64(i)*uint64(ramIndexEntrySize)
 		idx.ramIndex[i] = decodeRAMIndexEntry(idx.data[entryOffset : entryOffset+uint64(ramIndexEntrySize)])
 	}
@@ -433,7 +433,7 @@ func (idx *Index) Verify() error {
 	// Verify payload region hash using hash-of-hashes
 	// This matches the build-time computation: fold per-block hashes in order
 	payloadHasher := xxhash.New()
-	for blockID := 0; blockID < numBlocks; blockID++ {
+	for blockID := range numBlocks {
 		// Get this block's payload range from RAM index
 		startKey := idx.ramIndex[blockID].KeysBefore
 		endKey := idx.ramIndex[blockID+1].KeysBefore

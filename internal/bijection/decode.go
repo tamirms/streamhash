@@ -85,10 +85,7 @@ func (d *Decoder) QuerySlot(k0, k1 uint64, metadata []byte, keysInBlock int) (in
 		// O(1) direct computation: cumulative[segmentStart-1]
 		// high[segmentStart-1] = EFBitPos[segment-1] - segmentStart
 		// low[segmentStart-1] = read from low bits at position (segmentStart-1) * lowBits
-		highVal := efBitPosInHigh - segmentStart
-		if highVal < 0 {
-			highVal = 0
-		}
+		highVal := max(efBitPosInHigh-segmentStart, 0)
 		lowVal := readEFLowBits(efData, segmentStart-1, lowBits)
 		cumulativeAtSegmentStart = uint16(highVal<<lowBits) | lowVal
 	}
@@ -279,10 +276,10 @@ func (d *Decoder) resolveFallbackSeeds(metadata []byte, seedStreamOffset, bucket
 
 // decodeCheckpoints decodes checkpoints from buf.
 func decodeCheckpoints(buf []byte, cp *checkpoints) {
-	for i := 0; i < numCheckpoints; i++ {
+	for i := range numCheckpoints {
 		cp.efBitPos[i] = binary.LittleEndian.Uint16(buf[i*2:])
 	}
-	for i := 0; i < numCheckpoints; i++ {
+	for i := range numCheckpoints {
 		cp.seedBitPos[i] = binary.LittleEndian.Uint16(buf[numCheckpoints*2+i*2:])
 	}
 }
@@ -421,7 +418,7 @@ func loadWindow64Safe(data []byte, byteIdx int) uint64 {
 		return binary.LittleEndian.Uint64(data[byteIdx:])
 	}
 	var window uint64
-	for i := 0; i < remaining; i++ {
+	for i := range remaining {
 		window |= uint64(data[byteIdx+i]) << (i * 8)
 	}
 	for i := remaining; i < 8; i++ {
@@ -504,7 +501,7 @@ func decodeEliasFanoUnrolled(data []byte, n, U int, out *[bucketsPerBlock]uint16
 			out[i+7] = uint16((current >> (bitPos + 7*lowBits)) & lowMask)
 			bitPos += 8 * lowBits
 		} else {
-			for j := 0; j < 8; j++ {
+			for j := range 8 {
 				if bitPos >= 64 {
 					if bytePos+8 <= dataLen {
 						current = binary.LittleEndian.Uint64(data[bytePos:])
@@ -557,7 +554,7 @@ func decodeEliasFanoUnrolled(data []byte, n, U int, out *[bucketsPerBlock]uint16
 
 	// === PHASE 2: Read high bits ===
 	currentHigh := uint16(0)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		gap := uint32(0)
 		for {
 			if bitPos >= 64 {

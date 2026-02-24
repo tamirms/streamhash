@@ -30,7 +30,7 @@ func TestFastRange32Monotonicity(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 10000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := uint32(rng.Uint32N(math.MaxUint32)) + 1 // n in [1, MaxUint32]
 		h1 := rng.Uint64()
 		h2 := rng.Uint64()
@@ -52,7 +52,7 @@ func TestFastRange32Range(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 10000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := uint32(rng.Uint32N(math.MaxUint32)) + 1 // n in [1, MaxUint32]
 		h := rng.Uint64()
 

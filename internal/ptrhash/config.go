@@ -69,10 +69,7 @@ const (
 // computeNumSlots returns the number of slots for a given key count.
 // numSlots = ceil(numKeys / alpha), but always at least numKeys.
 func computeNumSlots(numKeys int) uint32 {
-	n := uint32(math.Ceil(float64(numKeys) / alpha))
-	if n < uint32(numKeys) {
-		n = uint32(numKeys)
-	}
+	n := max(uint32(math.Ceil(float64(numKeys)/alpha)), uint32(numKeys))
 	return n
 }
 
@@ -84,12 +81,10 @@ func numBlocks(totalKeys uint64) uint32 {
 		totalBuckets = 1
 	}
 
-	nb := uint32((totalBuckets + uint64(bucketsPerBlock) - 1) / uint64(bucketsPerBlock))
-	// Minimum 2 blocks ensures the prefix-based block routing
-	// (blockIndexFromPrefix) always has at least two targets,
-	// preventing degenerate single-block behavior.
-	if nb < 2 {
-		nb = 2
-	}
+	nb := max(
+		// Minimum 2 blocks ensures the prefix-based block routing
+		// (blockIndexFromPrefix) always has at least two targets,
+		// preventing degenerate single-block behavior.
+		uint32((totalBuckets+uint64(bucketsPerBlock)-1)/uint64(bucketsPerBlock)), 2)
 	return nb
 }

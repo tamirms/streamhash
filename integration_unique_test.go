@@ -91,11 +91,11 @@ func TestConcurrentQueries(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, numWorkers*queriesPerWorker)
 
-	for w := 0; w < numWorkers; w++ {
+	for w := range numWorkers {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			for i := 0; i < queriesPerWorker; i++ {
+			for i := range queriesPerWorker {
 				keyIdx := (workerID*queriesPerWorker + i) % len(keys)
 				rank, err := idx.Query(keys[keyIdx])
 				if err != nil {
@@ -209,7 +209,7 @@ func TestNonDuplicate16ByteKeys(t *testing.T) {
 	keys := make([][]byte, 2)
 	keys[0] = make([]byte, 16)
 	keys[1] = make([]byte, 16)
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		keys[0][i] = byte(i + 1)
 		keys[1][i] = byte(i + 1)
 	}
@@ -524,7 +524,7 @@ func TestRapidOpenClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		idx, err := Open(indexPath)
 		if err != nil {
 			t.Fatalf("Iteration %d: Open failed: %v", i, err)
@@ -571,7 +571,7 @@ func TestMixedKeyLengths(t *testing.T) {
 	rng := newTestRNG(t)
 	keys := make([][]byte, 0, numKeys)
 	for _, kl := range keyLens {
-		for i := 0; i < keysPerLen; i++ {
+		for range keysPerLen {
 			key := make([]byte, kl)
 			fillFromRNG(rng, key)
 			keys = append(keys, key)
@@ -599,7 +599,7 @@ func TestSameK1DifferentK0(t *testing.T) {
 	keys := make([][]byte, numKeys)
 	sharedK1 := uint64(0xDEADBEEFCAFEBABE)
 
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		key := make([]byte, 16)
 		binary.LittleEndian.PutUint64(key[0:8], uint64(i*12345+67890))
 		binary.LittleEndian.PutUint64(key[8:16], sharedK1)
@@ -654,7 +654,7 @@ func TestHybridFingerprintKeyLengths(t *testing.T) {
 		}},
 		{2, []testCase{
 			{16, "16B_uses_mixer"},
-			{17, "17B_uses_mixer"}, // 17-16=1 < 2
+			{17, "17B_uses_mixer"},   // 17-16=1 < 2
 			{18, "18B_uses_key_end"}, // boundary: 18-16=2 >= 2
 			{24, "24B_uses_key_end"},
 		}},
@@ -662,7 +662,7 @@ func TestHybridFingerprintKeyLengths(t *testing.T) {
 			{16, "16B_uses_mixer"},
 			{17, "17B_uses_mixer"},
 			{18, "18B_uses_mixer"},
-			{19, "19B_uses_mixer"}, // 19-16=3 < 4
+			{19, "19B_uses_mixer"},   // 19-16=3 < 4
 			{20, "20B_uses_key_end"}, // boundary: 20-16=4 >= 4
 			{24, "24B_uses_key_end"},
 		}},
@@ -684,7 +684,7 @@ func TestHybridFingerprintKeyLengths(t *testing.T) {
 					const numKeys = 100
 					keyRNG := newTestRNG(t)
 					keys := make([][]byte, numKeys)
-					for i := 0; i < numKeys; i++ {
+					for i := range numKeys {
 						key := make([]byte, tc.keyLen)
 						fillFromRNG(keyRNG, key)
 						keys[i] = key

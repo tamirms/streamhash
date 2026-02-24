@@ -242,7 +242,7 @@ func TestBuilderDuplicateKeys(t *testing.T) {
 	// Create 10 distinct keys and 1 duplicate
 	rng := newTestRNG(t)
 	keys := make([][]byte, 11)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		keys[i] = make([]byte, 16)
 		fillFromRNG(rng, keys[i])
 	}
@@ -289,7 +289,7 @@ func TestBuilderKeyCountMismatch(t *testing.T) {
 			t.Fatalf("NewBuilder failed: %v", err)
 		}
 
-		for i := 0; i < 50; i++ {
+		for i := range 50 {
 			key := make([]byte, 16)
 			binary.BigEndian.PutUint64(key[0:8], uint64(i+1))
 			binary.BigEndian.PutUint64(key[8:16], uint64(i)*0x123)
@@ -314,7 +314,7 @@ func TestBuilderKeyCountMismatch(t *testing.T) {
 			t.Fatalf("NewBuilder failed: %v", err)
 		}
 		var addErr error
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			key := make([]byte, 16)
 			binary.BigEndian.PutUint64(key[0:8], uint64(i+1))
 			binary.BigEndian.PutUint64(key[8:16], uint64(i)*0x123)
@@ -363,7 +363,7 @@ func TestFinishAfterClose(t *testing.T) {
 		t.Fatalf("NewBuilder failed: %v", err)
 	}
 	keys := make([][]byte, numKeys)
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		src := make([]byte, 20)
 		src[0] = byte(i >> 8)
 		src[1] = byte(i)
@@ -396,7 +396,7 @@ func TestAddKeyAfterFinish(t *testing.T) {
 		t.Fatalf("NewBuilder failed: %v", err)
 	}
 	keys := make([][]byte, numKeys)
-	for i := 0; i < numKeys; i++ {
+	for i := range numKeys {
 		src := make([]byte, 20)
 		src[0] = byte(i >> 8)
 		src[1] = byte(i)
@@ -497,7 +497,7 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewBuilder failed: %v", err)
 		}
-		for i := 0; i < 50; i++ {
+		for i := range 50 {
 			key := make([]byte, 16)
 			binary.BigEndian.PutUint64(key, uint64(i))
 			binary.BigEndian.PutUint64(key[8:], uint64(i*2))
@@ -524,7 +524,7 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 			t.Fatalf("NewBuilder failed: %v", err)
 		}
 		var addErr error
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			key := make([]byte, 16)
 			binary.BigEndian.PutUint64(key, uint64(i))
 			binary.BigEndian.PutUint64(key[8:], uint64(i*2))
@@ -1053,7 +1053,7 @@ func TestErrFingerprintMismatch(t *testing.T) {
 	mismatchCount := 0
 	notFoundCount := 0
 	otherErrCount := 0
-	for i := 0; i < numProbes; i++ {
+	for i := range numProbes {
 		nonMember := make([]byte, 32)
 		binary.BigEndian.PutUint64(nonMember[0:8], uint64(0xBADBAD0000000000)|uint64(i))
 		fillFromRNG(rng, nonMember[8:])

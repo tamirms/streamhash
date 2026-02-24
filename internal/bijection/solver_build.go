@@ -68,7 +68,7 @@ func (bb *Builder) solveSplitBucket(bucketIdx int, bucket []bucketEntry) (uint32
 	var seed0 uint32
 	var foundSeed0 bool
 
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		firstHalfSlots := bb.slots[:splitPoint]
 		clear(firstHalfSlots)
 
@@ -178,7 +178,7 @@ func (bb *Builder) solveDirectBucketArray(bucket []bucketEntry, size int, maxSee
 	}
 	slots := bb.slots[:size]
 
-	for seed := uint32(0); seed < maxSeed; seed++ {
+	for seed := range maxSeed {
 		clear(slots)
 
 		collision := false
@@ -224,7 +224,7 @@ func (bb *Builder) solveExtendedBitmask(bucket []bucketEntry, size int) (uint32,
 	maxExtendedSeed := maxExtendedSeedForB(blockBits)
 	bucketSize := uint32(size)
 
-	for seed := uint32(0); seed < maxExtendedSeed; seed++ {
+	for seed := range maxExtendedSeed {
 		var occupied uint64
 		collision := false
 		for _, entry := range bucket {
@@ -253,7 +253,7 @@ func (bb *Builder) solveExtendedArray(bucket []bucketEntry, size int) (uint32, e
 	}
 	slots := bb.slots[:size]
 
-	for seed := uint32(0); seed < maxExtendedSeed; seed++ {
+	for seed := range maxExtendedSeed {
 		clear(slots)
 
 		collision := false

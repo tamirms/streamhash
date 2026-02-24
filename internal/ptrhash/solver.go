@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
 
 	streamerrors "github.com/tamirms/streamhash/errors"
 )
@@ -88,7 +89,7 @@ type solver struct {
 	// Reusable buffers (avoid allocation in hot path)
 	slotsBuffer   []uint16    // Temp buffer for slot computation (max bucket size)
 	foldedBuffer  []uint64    // Temp buffer for precomputed h_folded values (max bucket size)
-	pendingHeap *bucketHeap // Reusable heap for eviction processing
+	pendingHeap   *bucketHeap // Reusable heap for eviction processing
 	bestSlots     []uint16    // Reusable buffer for best slots in Phase 2
 	evictedOwners []uint16    // Reusable buffer for evicted bucket owners
 	remapBuffer   []uint16    // Reusable buffer for remap table (numSlots - numKeys)
@@ -257,7 +258,7 @@ func (s *solver) processBucketWithHeap(bucketIdx int, rng *rand.Rand, bestSlots 
 		folded[i] = foldSlotInput(entry.k0, entry.suffix)
 	}
 
-	for delta := 0; delta < numPilotValues; delta++ {
+	for delta := range numPilotValues {
 		pilot := uint8((int(p0) + delta) % numPilotValues)
 
 		// First: compute all slots using precomputed folded values
@@ -331,11 +332,8 @@ func (s *solver) processBucketWithHeap(bucketIdx int, rng *rand.Rand, bestSlots 
 		if owner >= 0 && owner != bucketIdx {
 			found := false
 			owner16 := uint16(owner)
-			for _, e := range *evictedOwners {
-				if e == owner16 {
-					found = true
-					break
-				}
+			if slices.Contains(*evictedOwners, owner16) {
+				found = true
 			}
 			if !found {
 				*evictedOwners = append(*evictedOwners, owner16)
@@ -458,22 +456,17 @@ func newSolver(maxNumBuckets int, maxNumKeys int) *solver {
 	}
 
 	// Initial buffer size estimate (will be grown in reset() if actual max bucket size exceeds this)
-	maxBucketSize := int(math.Ceil(lambda * 3))
-	if maxBucketSize < minBufferAlloc {
-		maxBucketSize = minBufferAlloc // Floor to avoid degenerate small allocations
-	}
+	maxBucketSize := max(int(math.Ceil(lambda*3)),
+		// Floor to avoid degenerate small allocations
+		minBufferAlloc)
 
 	// Heap rarely holds more than ~10% of buckets (evictions are rare)
-	heapCapacity := maxNumBuckets / 10
-	if heapCapacity < minBufferAlloc {
-		heapCapacity = minBufferAlloc // Floor to avoid degenerate small allocations
-	}
+	heapCapacity := max(maxNumBuckets/10,
+		// Floor to avoid degenerate small allocations
+		minBufferAlloc)
 
 	// Pre-allocate remap buffer: size is numSlots - numKeys ~= 1% of keys at alpha=0.99
-	maxRemapSize := int(maxNumSlots) - maxNumKeys
-	if maxRemapSize < 0 {
-		maxRemapSize = 0
-	}
+	maxRemapSize := max(int(maxNumSlots)-maxNumKeys, 0)
 
 	return &solver{
 		bucketStarts:  make([]uint16, maxNumBuckets+1),

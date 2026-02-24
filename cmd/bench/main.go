@@ -288,7 +288,7 @@ func main() {
 	queryOrder := mrand.Perm(numKeys)
 
 	fmt.Println("Warming up queries...")
-	for i := 0; i < 10000; i++ {
+	for i := range 10000 {
 		if payloadSize > 0 {
 			_, _ = idx.QueryPayload(keys[queryOrder[i%numKeys]][:]) // Benchmark: measuring throughput, not correctness
 		} else {
@@ -299,7 +299,7 @@ func main() {
 	fmt.Println("Benchmarking queries...")
 	numQueries := 100000
 	queryStart := time.Now()
-	for i := 0; i < numQueries; i++ {
+	for i := range numQueries {
 		if payloadSize > 0 {
 			_, _ = idx.QueryPayload(keys[queryOrder[i%numKeys]][:])
 		} else {

@@ -64,7 +64,7 @@ func TestCheckpointsRoundTrip(t *testing.T) {
 			var decoded checkpoints
 			decodeCheckpoints(buf, &decoded)
 
-			for i := 0; i < numCheckpoints; i++ {
+			for i := range numCheckpoints {
 				if decoded.efBitPos[i] != tc.cp.efBitPos[i] {
 					t.Errorf("efBitPos[%d]: got %d, want %d",
 						i, decoded.efBitPos[i], tc.cp.efBitPos[i])
@@ -88,7 +88,7 @@ func TestGRSeedExhaustiveRoundtrip(t *testing.T) {
 			continue
 		}
 
-		for seed := uint32(0); seed < maxSeed; seed++ {
+		for seed := range maxSeed {
 			enc := newSeedStreamEncoder()
 			enc.encodeSeed(seed, size)
 			data := enc.bytes()
@@ -109,7 +109,7 @@ func TestGRSeedSequenceRoundtrip(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		// Generate random sequence of seeds for various bucket sizes
 		n := 2 + rng.IntN(20)
 		sizes := make([]int, n)
@@ -261,7 +261,7 @@ func TestEFDecodeRoundtrip(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := 8 + rng.IntN(1017) // [8, 1024]
 		U := n + rng.IntN(65536-n)
 
@@ -292,7 +292,7 @@ func TestEFDecodeRoundtrip(t *testing.T) {
 		var out [bucketsPerBlock]uint16
 		decodeEliasFanoUnrolled(encoded, n, U, &out)
 
-		for j := 0; j < n; j++ {
+		for j := range n {
 			if out[j] != cumulative[j] {
 				t.Fatalf("iter %d: n=%d U=%d idx=%d: decoded=%d want=%d",
 					i, n, U, j, out[j], cumulative[j])
@@ -306,7 +306,7 @@ func TestEFSizeBound(t *testing.T) {
 	rng := newTestRNG(t)
 	const iterations = 1000
 
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		n := 1 + rng.IntN(1024)
 		U := n + rng.IntN(65536-n)
 
@@ -369,7 +369,7 @@ func TestEFSmallEncodedData(t *testing.T) {
 			}
 
 			// Verify low bits via readEFLowBits
-			for j := 0; j < n; j++ {
+			for j := range n {
 				expectedLow := tc.cumulative[j] & lowMask
 				gotLow := readEFLowBits(encoded, j, lowBits)
 				if gotLow != expectedLow {
@@ -381,7 +381,7 @@ func TestEFSmallEncodedData(t *testing.T) {
 			lowBitsTotal := n * lowBits
 			bitPos := 0
 			currentHigh := uint16(0)
-			for j := 0; j < n; j++ {
+			for j := range n {
 				for {
 					absBitPos := lowBitsTotal + bitPos
 					byteIdx := absBitPos / 8

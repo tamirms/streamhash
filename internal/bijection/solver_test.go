@@ -38,7 +38,7 @@ func buildBlockAndDecode(t *testing.T, rng *rand.Rand, numKeys int, globalSeed u
 	t.Helper()
 
 	bb := NewBuilder(uint64(numKeys*2), globalSeed, 0, 0) // MPHF-only
-	bb.maxKeysPerBlock = numKeys + 1000                    // allow large blocks for testing
+	bb.maxKeysPerBlock = numKeys + 1000                   // allow large blocks for testing
 
 	keys := make([]keyPair, numKeys)
 	for i := range keys {
@@ -165,7 +165,7 @@ func TestSolverWithSpecificFailingKeys(t *testing.T) {
 	if needsFallback {
 		// Verify extended search succeeds for these keys
 		maxSeed := maxExtendedSeedForB(blockBits)
-		for s := uint32(0); s < maxSeed; s++ {
+		for s := range maxSeed {
 			sA := mixFromParts(mixPartsA, s, 2)
 			sB := mixFromParts(mixPartsB, s, 2)
 			if sA != sB {
@@ -198,7 +198,7 @@ func TestSolveBucketSpecializedVsBitmask(t *testing.T) {
 			specializedSuccesses := 0
 			bitmaskSuccesses := 0
 
-			for trial := 0; trial < 100; trial++ {
+			for trial := range 100 {
 				// Generate random mixParts
 				entries := make([]bucketEntry, size)
 				for j := range entries {
@@ -259,7 +259,7 @@ func TestSolveBucketBitmaskLargerSizes(t *testing.T) {
 			extMax := maxExtendedSeedForB(blockBits)
 			extSuccesses := 0
 
-			for trial := 0; trial < 100; trial++ {
+			for range 100 {
 				entries := make([]bucketEntry, size)
 				for j := range entries {
 					entries[j].mixParts = mixParts{
@@ -362,7 +362,7 @@ func TestSolverPostCondition(t *testing.T) {
 	for _, keyCount := range keyCounts {
 		t.Run(fmt.Sprintf("keys=%d", keyCount), func(t *testing.T) {
 			rng := newTestRNG(t)
-			for trial := 0; trial < 10; trial++ {
+			for trial := range 10 {
 				globalSeed := testSeed1 ^ uint64(keyCount) ^ uint64(trial)
 
 				meta, keys, dec := buildBlockAndDecode(t, rng, keyCount, globalSeed)

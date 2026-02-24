@@ -49,7 +49,7 @@ func (s *solver) findFreePilot1(bucket []bucketEntry) (uint8, bool) {
 
 	e0 := bucket[0]
 	hf0 := foldSlotInput(e0.k0, e0.suffix)
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		slot := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		if !slotGenIsTaken(slotGenBase, gen, slot) {
@@ -70,7 +70,7 @@ func (s *solver) findFreePilot2(bucket []bucketEntry) (uint8, bool) {
 	hf0 := foldSlotInput(e0.k0, e0.suffix)
 	hf1 := foldSlotInput(e1.k0, e1.suffix)
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		slot0 := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		if slotGenIsTaken(slotGenBase, gen, slot0) {
@@ -102,7 +102,7 @@ func (s *solver) findFreePilot3(bucket []bucketEntry) (uint8, bool) {
 	hf1 := foldSlotInput(e1.k0, e1.suffix)
 	hf2 := foldSlotInput(e2.k0, e2.suffix)
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		slot0 := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		slot1 := pilotSlotFolded(hf1, s.pilotHPs[pilot], numSlots)
@@ -137,7 +137,7 @@ func (s *solver) findFreePilot4(bucket []bucketEntry) (uint8, bool) {
 	hf2 := foldSlotInput(e2.k0, e2.suffix)
 	hf3 := foldSlotInput(e3.k0, e3.suffix)
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		slot0 := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		slot1 := pilotSlotFolded(hf1, s.pilotHPs[pilot], numSlots)
@@ -177,7 +177,7 @@ func (s *solver) findFreePilot5(bucket []bucketEntry) (uint8, bool) {
 	hf3 := foldSlotInput(e3.k0, e3.suffix)
 	hf4 := foldSlotInput(e4.k0, e4.suffix)
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		s0 := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		s1 := pilotSlotFolded(hf1, s.pilotHPs[pilot], numSlots)
@@ -224,7 +224,7 @@ func (s *solver) findFreePilot6(bucket []bucketEntry) (uint8, bool) {
 	hf4 := foldSlotInput(e4.k0, e4.suffix)
 	hf5 := foldSlotInput(e5.k0, e5.suffix)
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		s0 := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		s1 := pilotSlotFolded(hf1, s.pilotHPs[pilot], numSlots)
@@ -276,7 +276,7 @@ func (s *solver) findFreePilot7(bucket []bucketEntry) (uint8, bool) {
 	hf5 := foldSlotInput(e5.k0, e5.suffix)
 	hf6 := foldSlotInput(e6.k0, e6.suffix)
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		s0 := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		s1 := pilotSlotFolded(hf1, s.pilotHPs[pilot], numSlots)
@@ -334,7 +334,7 @@ func (s *solver) findFreePilot8(bucket []bucketEntry) (uint8, bool) {
 	hf6 := foldSlotInput(e6.k0, e6.suffix)
 	hf7 := foldSlotInput(e7.k0, e7.suffix)
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		s0 := pilotSlotFolded(hf0, s.pilotHPs[pilot], numSlots)
 		s1 := pilotSlotFolded(hf1, s.pilotHPs[pilot], numSlots)
@@ -391,11 +391,11 @@ func (s *solver) findFreePilotSlice(bucket []bucketEntry) (uint8, bool) {
 	r := (n / 4) * 4 // round down to multiple of 4 for chunked processing below
 
 	// Precompute folded hash values outside the pilot loop.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		folded[i] = foldSlotInput(bucket[i].k0, bucket[i].suffix)
 	}
 
-	for pilotInt := 0; pilotInt < numPilotValues; pilotInt++ {
+	for pilotInt := range numPilotValues {
 		pilot := uint8(pilotInt)
 		anyTaken := false
 
@@ -439,7 +439,7 @@ func (s *solver) findFreePilotSlice(bucket []bucketEntry) (uint8, bool) {
 // slot input (k0 ^ suffix). Such entries produce identical slots for all pilots,
 // making them indistinguishable to the MPHF.
 func hasDuplicateSlotInput(bucket []bucketEntry) bool {
-	for i := 0; i < len(bucket); i++ {
+	for i := range bucket {
 		xi := bucket[i].k0 ^ bucket[i].suffix
 		for j := i + 1; j < len(bucket); j++ {
 			if xi == bucket[j].k0^bucket[j].suffix {
@@ -457,7 +457,7 @@ func hasDuplicateSlotInput(bucket []bucketEntry) bool {
 func (s *solver) hasNoDuplicateSlots(slots []uint16) bool {
 	localGen := s.generation + 1
 	n := len(slots)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		slot := slots[i]
 		if s.slotGen[slot] == localGen {
 			for j := 0; j < i; j++ {
@@ -467,7 +467,7 @@ func (s *solver) hasNoDuplicateSlots(slots []uint16) bool {
 		}
 		s.slotGen[slot] = localGen
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s.slotGen[slots[i]] = 0
 	}
 	return true

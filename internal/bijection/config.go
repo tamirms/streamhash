@@ -53,12 +53,10 @@ func numBlocks(totalKeys uint64) uint32 {
 		totalBuckets = 1
 	}
 
-	nb := uint32((totalBuckets + uint64(bucketsPerBlock) - 1) / uint64(bucketsPerBlock))
-	// Minimum 2 blocks ensures the framework's block-routing (FastRange32)
-	// has meaningful distribution.
-	if nb < 2 {
-		nb = 2
-	}
+	nb := max(
+		// Minimum 2 blocks ensures the framework's block-routing (FastRange32)
+		// has meaningful distribution.
+		uint32((totalBuckets+uint64(bucketsPerBlock)-1)/uint64(bucketsPerBlock)), 2)
 	return nb
 }
 

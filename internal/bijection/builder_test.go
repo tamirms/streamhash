@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	streamerrors "github.com/tamirms/streamhash/errors"
 	intbits "github.com/tamirms/streamhash/internal/bits"
 	"github.com/tamirms/streamhash/internal/encoding"
-	streamerrors "github.com/tamirms/streamhash/errors"
 )
 
 // NOTE: TestEstimateMetadataSizeIsUpperBound, TestEmptyBlockMetadataSize,
@@ -106,13 +106,13 @@ func TestEstimateMetadataSizeRandomBlocks(t *testing.T) {
 
 	rng := newTestRNG(t)
 	for _, globalSeed := range globalSeeds {
-		for trial := 0; trial < 10; trial++ {
+		for trial := range 10 {
 			numKeys := rng.IntN(3072) + 1 // 1 to 3072 keys (natural bijection block size)
 
 			estimate := estimateMetadataSize(numKeys)
 			builder := NewBuilder(100000, globalSeed, 4, 1)
 
-			for i := 0; i < numKeys; i++ {
+			for i := range numKeys {
 				k0 := rng.Uint64()
 				k1 := rng.Uint64()
 				builder.AddKey(k0, k1, uint64(i), uint32(i&0xFF))
@@ -143,7 +143,7 @@ func TestBlockOverflowReturnsError(t *testing.T) {
 	builder := NewBuilder(100, testSeed1, 4, 1)
 
 	rng := newTestRNG(t)
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		builder.AddKey(rng.Uint64(), rng.Uint64(), uint64(i), uint32(i&0xFF))
 	}
 
@@ -194,7 +194,7 @@ func TestPayloadRoundtripAllSizes(t *testing.T) {
 			keys := make([]keyRecord, numKeys)
 
 			rng := newTestRNG(t)
-			for i := 0; i < numKeys; i++ {
+			for i := range numKeys {
 				k0 := rng.Uint64()
 				k1 := rng.Uint64()
 				payload := uint64(i) & payloadMask
@@ -317,7 +317,7 @@ func TestBuilderReset(t *testing.T) {
 		fingerprint uint32
 	}
 	keys1 := make([]keyRecord, numKeysBlock1)
-	for i := 0; i < numKeysBlock1; i++ {
+	for i := range numKeysBlock1 {
 		k0 := rng.Uint64()
 		k1 := rng.Uint64()
 		payload := uint64(i) & 0xFFFFFFFF
@@ -376,7 +376,7 @@ func TestBuilderReset(t *testing.T) {
 	}
 
 	keys2 := make([]keyRecord, numKeysBlock2)
-	for i := 0; i < numKeysBlock2; i++ {
+	for i := range numKeysBlock2 {
 		k0 := rng.Uint64()
 		k1 := rng.Uint64()
 		payload := uint64(i+1000) & 0xFFFFFFFF
@@ -465,7 +465,7 @@ func TestSplitBucketPayloadRoundtrip(t *testing.T) {
 			keys := make([]keyRecord, numKeys)
 
 			rng := newTestRNG(t)
-			for i := 0; i < numKeys; i++ {
+			for i := range numKeys {
 				k0 := rng.Uint64()
 				k1 := rng.Uint64()
 				payload := uint64(i) & payloadMask

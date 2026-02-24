@@ -2,8 +2,8 @@ package streamhash
 
 import (
 	"bytes"
-	"context"
 	"cmp"
+	"context"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -392,7 +392,7 @@ func BenchmarkAddKey(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for j := 0; j < numKeys; j++ {
+		for j := range numKeys {
 			if err := builder.AddKey(keys[j][:], uint64(j)); err != nil {
 				b.Fatal(err)
 			}
