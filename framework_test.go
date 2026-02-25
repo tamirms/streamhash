@@ -10,15 +10,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"hash/fnv"
 	"math"
 	randv2 "math/rand/v2"
 	"os"
 	"slices"
 	"testing"
-
-	streamerrors "github.com/tamirms/streamhash/errors"
 )
 
 // Named seeds for deterministic reproduction.
@@ -200,7 +197,9 @@ func TestBlockOrderWithExtractPrefix(t *testing.T) {
 // UnsortedBuffer tests
 // =============================================================================
 
-func TestUnsortedBuffer_RoundTrip(t *testing.T) {
+// TestUnsortedBuffer_FlushAndReadPartition tests the partition flush round-trip:
+// addKey → flush → readPartition → verify all entries are recovered.
+func TestUnsortedBuffer_FlushAndReadPartition(t *testing.T) {
 	rng := newTestRNG(t)
 	configs := []struct {
 		name    string
@@ -234,7 +233,6 @@ func TestUnsortedBuffer_RoundTrip(t *testing.T) {
 			defer u.cleanup()
 
 			type testEntry struct {
-				key         []byte
 				k0, k1      uint64
 				payload     uint64
 				fingerprint uint32
@@ -259,21 +257,40 @@ func TestUnsortedBuffer_RoundTrip(t *testing.T) {
 				}
 				prefix := extractPrefix(key)
 				blockID := blockIndexFromPrefix(prefix, numBlocks)
-				entries = append(entries, testEntry{key, k0, k1, payload, fp, blockID})
+				entries = append(entries, testEntry{k0, k1, payload, fp, blockID})
 			}
 
 			for _, e := range entries {
-				if err := u.addKey(e.k0, e.k1, e.payload, e.fingerprint, e.blockID); err != nil {
-					t.Fatalf("addKey: %v", err)
+				if u.addKey(e.k0, e.k1, e.payload, e.fingerprint, e.blockID) {
+					if err := u.flush(); err != nil {
+						t.Fatalf("flush: %v", err)
+					}
 				}
 			}
 
-			u.prepareForRead()
+			// Flush and read back via partitions
+			if err := u.prepareForRead(); err != nil {
+				t.Fatalf("prepareForRead: %v", err)
+			}
+
+			// Read all partitions and collect entries by blockID
+			recovered := make(map[uint32][]routedEntry)
+			for p := range u.numPartitions {
+				blockEntries, err := u.readPartition(p, nil)
+				if err != nil {
+					t.Fatalf("readPartition(%d): %v", p, err)
+				}
+				partStartBlock := p * u.blocksPerPart
+				for localIdx, entries := range blockEntries {
+					blockID := uint32(partStartBlock + localIdx)
+					recovered[blockID] = append(recovered[blockID], entries...)
+				}
+			}
+
+			// Verify all entries are recovered
 			for _, e := range entries {
-				count := u.blockCount(e.blockID)
 				found := false
-				for i := range count {
-					got := u.readEntry(e.blockID, i)
+				for _, got := range recovered[e.blockID] {
 					if got.k0 == e.k0 && got.k1 == e.k1 {
 						if got.payload != e.payload {
 							t.Errorf("payload mismatch: got %d, want %d", got.payload, e.payload)
@@ -293,13 +310,21 @@ func TestUnsortedBuffer_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestUnsortedBuffer_MultipleBlocks(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 10000, 4, 0)
+// TestUnsortedBuffer_FastPath tests that small datasets that fit entirely
+// in the flush buffer skip file I/O (fast path).
+func TestUnsortedBuffer_FastPath(t *testing.T) {
+	numKeys := uint64(50) // Very small, fits in any flush buffer
+	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 4, 0)
 	if err != nil {
 		t.Fatalf("numBlocksForAlgo: %v", err)
 	}
 
-	cfg := &buildConfig{totalKeys: 10000, payloadSize: 4, tempDir: t.TempDir()}
+	cfg := &buildConfig{
+		totalKeys:   numKeys,
+		payloadSize: 4,
+		tempDir:     t.TempDir(),
+	}
+
 	u, err := newUnsortedBuffer(cfg, numBlocks)
 	if err != nil {
 		t.Fatalf("newUnsortedBuffer: %v", err)
@@ -307,141 +332,177 @@ func TestUnsortedBuffer_MultipleBlocks(t *testing.T) {
 	defer u.cleanup()
 
 	rng := newTestRNG(t)
-	blockEntries := make(map[uint32]int)
-
-	for i := range 500 {
+	for i := range int(numKeys) {
 		key := make([]byte, 16)
-		binary.LittleEndian.PutUint64(key[0:8], rng.Uint64())
-		binary.LittleEndian.PutUint64(key[8:16], rng.Uint64())
+		fillFromRNG(rng, key)
 		k0 := binary.LittleEndian.Uint64(key[0:8])
 		k1 := binary.LittleEndian.Uint64(key[8:16])
 		prefix := extractPrefix(key)
 		blockID := blockIndexFromPrefix(prefix, numBlocks)
-		payload := uint64(i)
-
-		if err := u.addKey(k0, k1, payload, 0, blockID); err != nil {
-			t.Fatalf("addKey: %v", err)
-		}
-		blockEntries[blockID]++
-	}
-
-	u.prepareForRead()
-	for blockID, expectedCount := range blockEntries {
-		got := u.blockCount(blockID)
-		if int(got) != expectedCount {
-			t.Errorf("block %d: got count %d, want %d", blockID, got, expectedCount)
-		}
-	}
-}
-
-func TestUnsortedBuffer_EmptyBlocks(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 10000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 10000, payloadSize: 4, tempDir: t.TempDir()}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	for blockID := range numBlocks {
-		if got := u.blockCount(blockID); got != 0 {
-			t.Errorf("block %d: expected count 0, got %d", blockID, got)
-		}
-	}
-}
-
-func TestUnsortedBuffer_RegionOverflow(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 10000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 10000, payloadSize: 4, tempDir: t.TempDir()}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	sharedPrefix := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
-	for i := uint32(0); i < u.regionCapacity; i++ {
-		key := make([]byte, 16)
-		copy(key[:8], sharedPrefix)
-		binary.BigEndian.PutUint64(key[8:], uint64(i))
-		k0 := binary.LittleEndian.Uint64(key[0:8])
-		k1 := binary.LittleEndian.Uint64(key[8:16])
-		prefix := extractPrefix(key)
-		blockID := blockIndexFromPrefix(prefix, numBlocks)
-
-		if err := u.addKey(k0, k1, uint64(i), 0, blockID); err != nil {
-			t.Fatalf("addKey at %d: %v", i, err)
-		}
-	}
-
-	key := make([]byte, 16)
-	copy(key[:8], sharedPrefix)
-	binary.BigEndian.PutUint64(key[8:], uint64(u.regionCapacity))
-	k0 := binary.LittleEndian.Uint64(key[0:8])
-	k1 := binary.LittleEndian.Uint64(key[8:16])
-	prefix := extractPrefix(key)
-	blockID := blockIndexFromPrefix(prefix, numBlocks)
-
-	err = u.addKey(k0, k1, 0, 0, blockID)
-	if !errors.Is(err, streamerrors.ErrRegionOverflow) {
-		t.Errorf("expected ErrRegionOverflow, got: %v", err)
-	}
-}
-
-// TestUnsortedBuffer_CapacityHoldsForRealKeys verifies that regionCapacity is
-// always >= the number of keys any block actually receives when distributing
-// random keys, rather than tautologically reimplementing the formula.
-func TestUnsortedBuffer_CapacityHoldsForRealKeys(t *testing.T) {
-	configs := []struct {
-		n       uint64
-		payload int
-		fp      int
-	}{
-		{1000, 4, 0},
-		{10000, 4, 0},
-		{100000, 0, 0},
-		{1000, 4, 2},
-	}
-
-	rng := newTestRNG(t)
-	for _, tc := range configs {
-		numBlocks, err := numBlocksForAlgo(AlgoBijection, tc.n, tc.payload, tc.fp)
-		if err != nil {
-			t.Fatalf("numBlocksForAlgo(%d, %d, %d): %v", tc.n, tc.payload, tc.fp, err)
-		}
-
-		bcfg := &buildConfig{totalKeys: tc.n, payloadSize: tc.payload, fingerprintSize: tc.fp, tempDir: t.TempDir()}
-		u, err := newUnsortedBuffer(bcfg, numBlocks)
-		if err != nil {
-			t.Fatalf("newUnsortedBuffer: %v", err)
-		}
-		defer u.cleanup()
-
-		// Distribute tc.n random keys and count how many land in each block
-		blockCounts := make([]int, numBlocks)
-		for i := uint64(0); i < tc.n; i++ {
-			key := make([]byte, 16)
-			fillFromRNG(rng, key)
-			prefix := extractPrefix(key)
-			blockID := blockIndexFromPrefix(prefix, numBlocks)
-			blockCounts[blockID]++
-		}
-
-		// Verify no block exceeds regionCapacity
-		for blockID, count := range blockCounts {
-			if uint32(count) > u.regionCapacity {
-				t.Errorf("n=%d block %d: %d keys > regionCapacity %d",
-					tc.n, blockID, count, u.regionCapacity)
+		if u.addKey(k0, k1, uint64(i), 0, blockID) {
+			if err := u.flush(); err != nil {
+				t.Fatalf("flush %d: %v", i, err)
 			}
 		}
+	}
+
+	// After adding all keys, flushed should still be false (fast path)
+	if u.flushed {
+		t.Error("expected flushed=false for small dataset (fast path)")
+	}
+	// partDir is created eagerly (for early temp dir validation),
+	// but no partition files should exist yet
+	if u.partDir == "" {
+		t.Error("expected partDir to be set")
+	} else {
+		entries, err := os.ReadDir(u.partDir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		if len(entries) > 0 {
+			t.Errorf("expected empty partDir (fast path), got %d files", len(entries))
+		}
+	}
+}
+
+// TestUnsortedBuffer_LastPartitionBoundary tests off-by-one handling
+// for the last partition when numBlocks is not evenly divisible by blocksPerPart.
+func TestUnsortedBuffer_LastPartitionBoundary(t *testing.T) {
+	// Use enough keys to get multiple partitions with a small memory budget
+	numKeys := uint64(5000)
+	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 0, 0)
+	if err != nil {
+		t.Fatalf("numBlocksForAlgo: %v", err)
+	}
+
+	cfg := &buildConfig{
+		totalKeys:            numKeys,
+		tempDir:              t.TempDir(),
+		unsortedMemoryBudget: 4096, // Very small to force many partitions
+	}
+
+	u, err := newUnsortedBuffer(cfg, numBlocks)
+	if err != nil {
+		t.Fatalf("newUnsortedBuffer: %v", err)
+	}
+	defer u.cleanup()
+
+	// Verify partition layout covers all blocks
+	lastPartStart := (u.numPartitions - 1) * u.blocksPerPart
+	lastPartEnd := lastPartStart + u.blocksPerPart
+	if lastPartEnd < int(numBlocks) {
+		t.Errorf("last partition ends at block %d but numBlocks=%d", lastPartEnd, numBlocks)
+	}
+
+	// Verify partitionID for last block maps to last partition
+	lastBlockPartID := u.partitionID(numBlocks - 1)
+	if lastBlockPartID != u.numPartitions-1 {
+		t.Errorf("last block (ID=%d) maps to partition %d, expected %d",
+			numBlocks-1, lastBlockPartID, u.numPartitions-1)
+	}
+}
+
+// TestUnsortedBuffer_EmptyPartitions tests handling of partition files
+// that have no entries (empty or non-existent).
+func TestUnsortedBuffer_EmptyPartitions(t *testing.T) {
+	numKeys := uint64(5000)
+	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 0, 0)
+	if err != nil {
+		t.Fatalf("numBlocksForAlgo: %v", err)
+	}
+
+	cfg := &buildConfig{
+		totalKeys:            numKeys,
+		tempDir:              t.TempDir(),
+		unsortedMemoryBudget: 4096, // Small budget → many partitions
+	}
+
+	u, err := newUnsortedBuffer(cfg, numBlocks)
+	if err != nil {
+		t.Fatalf("newUnsortedBuffer: %v", err)
+	}
+	defer u.cleanup()
+
+	// Don't add any keys, just flush (creating partition dir)
+	if err := u.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Read back — all partitions should return empty block slices
+	for p := range u.numPartitions {
+		blockEntries, err := u.readPartition(p, nil)
+		if err != nil {
+			t.Fatalf("readPartition(%d): %v", p, err)
+		}
+		for localIdx, entries := range blockEntries {
+			if len(entries) > 0 {
+				t.Errorf("partition %d block %d: expected 0 entries, got %d",
+					p, localIdx, len(entries))
+			}
+		}
+	}
+}
+
+// TestUnsortedBuffer_CorruptionDetection verifies that readPartition detects
+// entries whose recomputed blockID falls outside the partition's block range.
+func TestUnsortedBuffer_CorruptionDetection(t *testing.T) {
+	numKeys := uint64(10000)
+	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 0, 0)
+	if err != nil {
+		t.Fatalf("numBlocksForAlgo: %v", err)
+	}
+
+	cfg := &buildConfig{
+		totalKeys: numKeys,
+		tempDir:   t.TempDir(),
+	}
+	u, err := newUnsortedBuffer(cfg, numBlocks)
+	if err != nil {
+		t.Fatalf("newUnsortedBuffer: %v", err)
+	}
+	defer u.cleanup()
+
+	if u.numPartitions < 2 {
+		t.Skip("need at least 2 partitions for corruption test")
+	}
+
+	// Find a key that routes to the last partition's block range
+	rng := newTestRNG(t)
+	lastPartStart := (u.numPartitions - 1) * u.blocksPerPart
+	var corruptK0, corruptK1 uint64
+	found := false
+	for attempt := 0; attempt < 100000; attempt++ {
+		key := make([]byte, 16)
+		fillFromRNG(rng, key)
+		k0 := binary.LittleEndian.Uint64(key[0:8])
+		prefix := extractPrefix(key)
+		blockID := blockIndexFromPrefix(prefix, numBlocks)
+		if int(blockID) >= lastPartStart {
+			corruptK0 = k0
+			corruptK1 = binary.LittleEndian.Uint64(key[8:16])
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("could not find a key routing to the last partition")
+	}
+
+	// Write this entry into partition 0's file (it should be in the last partition)
+	entryBuf := make([]byte, u.entrySize)
+	binary.LittleEndian.PutUint64(entryBuf[0:8], corruptK0)
+	binary.LittleEndian.PutUint64(entryBuf[8:16], corruptK1)
+	if err := os.WriteFile(u.partPaths[0], entryBuf, 0600); err != nil {
+		t.Fatalf("write corrupt partition: %v", err)
+	}
+
+	// readPartition should detect the misplaced entry
+	_, err = u.readPartition(0, nil)
+	if err == nil {
+		t.Fatal("expected error for corrupt partition (blockID outside range), got nil")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("outside range")) {
+		t.Errorf("expected 'outside range' in error, got: %v", err)
 	}
 }
 
@@ -457,6 +518,11 @@ func TestUnsortedBuffer_CleanupIdempotent(t *testing.T) {
 		t.Fatalf("newUnsortedBuffer: %v", err)
 	}
 
+	// Force a flush to create partition directory
+	if err := u.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
 	if err := u.cleanup(); err != nil {
 		t.Fatalf("first cleanup: %v", err)
 	}
@@ -466,7 +532,7 @@ func TestUnsortedBuffer_CleanupIdempotent(t *testing.T) {
 	}
 }
 
-func TestUnsortedBuffer_CleanupRemovesTempFile(t *testing.T) {
+func TestUnsortedBuffer_CleanupRemovesPartDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	numBlocks, err := numBlocksForAlgo(AlgoBijection, 1000, 4, 0)
 	if err != nil {
@@ -479,24 +545,26 @@ func TestUnsortedBuffer_CleanupRemovesTempFile(t *testing.T) {
 		t.Fatalf("newUnsortedBuffer: %v", err)
 	}
 
-	tempPath := u.tempPath
+	// Force flush to create partition directory
+	if err := u.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	partDir := u.partDir
+	if partDir == "" {
+		t.Fatal("expected partDir to be set after flush")
+	}
 
 	if err := u.cleanup(); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 
-	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
-		t.Errorf("temp file still exists after cleanup: %s", tempPath)
+	if _, err := os.Stat(partDir); !os.IsNotExist(err) {
+		t.Errorf("partition directory still exists after cleanup: %s", partDir)
 	}
 
-	if u.tempData != nil {
-		t.Error("tempData should be nil after cleanup")
-	}
-	if u.tempFile != nil {
-		t.Error("tempFile should be nil after cleanup")
-	}
-	if u.counter != nil {
-		t.Error("counter should be nil after cleanup")
+	if u.partDir != "" {
+		t.Error("partDir should be empty after cleanup")
 	}
 }
 

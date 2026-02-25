@@ -168,7 +168,7 @@ func NewBuilder(ctx context.Context, output string, totalKeys uint64, opts ...Bu
 	}
 
 	if cfg.unsortedInput {
-		// Unsorted mode: initialize temp file and mmap
+		// Unsorted mode: initialize partition flush buffer
 		buf, err := newUnsortedBuffer(cfg, numBlocks)
 		if err != nil {
 			primaryErr := fmt.Errorf("init unsorted mode: %w", err)
@@ -238,11 +238,19 @@ func (b *Builder) AddKey(key []byte, payload uint64) error {
 	k1 := binary.LittleEndian.Uint64(key[8:16])
 	prefix := bits.ReverseBytes64(k0) // Big-endian for monotonic routing
 	blockIdx := intbits.FastRange32(prefix, b.numBlocks)
-	fingerprint := b.extractFingerprintHybrid(key, k0, k1)
+
+	// Inline fpSize==0 fast path to avoid function call overhead (~5ns × N keys).
+	// extractFingerprintHybrid is too complex to inline (cost 139 > budget 80).
+	var fingerprint uint32
+	if b.cfg.fingerprintSize > 0 {
+		fingerprint = b.extractFingerprintHybrid(key, k0, k1)
+	}
 
 	if b.unsortedBuf != nil {
-		if err := b.unsortedBuf.addKey(k0, k1, payload, fingerprint, blockIdx); err != nil {
-			return err
+		if b.unsortedBuf.addKey(k0, k1, payload, fingerprint, blockIdx) {
+			if err := b.unsortedBuf.flush(); err != nil {
+				return err
+			}
 		}
 		// Track key count only after successful add
 		b.totalKeysAdded++

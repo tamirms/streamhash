@@ -427,43 +427,6 @@ func TestAddKeyAfterFinish(t *testing.T) {
 	}
 }
 
-func TestUnsortedBuilderRegionOverflow(t *testing.T) {
-	tmpDir := t.TempDir()
-	indexPath := filepath.Join(tmpDir, "overflow.idx")
-
-	// Create keys that all hash to the same block to overflow the region
-	numKeys := 10000
-	keys := make([][]byte, numKeys)
-	for i := range keys {
-		keys[i] = make([]byte, 16)
-		// Same first 8 bytes → same block
-		binary.BigEndian.PutUint64(keys[i][0:8], 0x0000000000000001)
-		binary.BigEndian.PutUint64(keys[i][8:16], uint64(i))
-	}
-
-	builder, err := NewBuilder(context.Background(), indexPath, uint64(numKeys),
-		WithUnsortedInput(), WithTempDir(tmpDir))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var addErr error
-	for _, key := range keys {
-		if err := builder.AddKey(key, 0); err != nil {
-			addErr = err
-			break
-		}
-	}
-	builder.Close()
-
-	if addErr == nil {
-		t.Fatal("expected ErrRegionOverflow but all AddKey calls succeeded")
-	}
-	if !errors.Is(addErr, streamerrors.ErrRegionOverflow) {
-		t.Errorf("expected ErrRegionOverflow, got %v", addErr)
-	}
-}
-
 func TestUnsortedBuilder_KeyTooShort(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -540,8 +503,8 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 		}
 		if addErr == nil {
 			t.Error("Expected error for adding too many keys, got nil")
-		} else if !errors.Is(addErr, streamerrors.ErrKeyCountMismatch) && !errors.Is(addErr, streamerrors.ErrRegionOverflow) {
-			t.Errorf("Expected ErrKeyCountMismatch or ErrRegionOverflow, got: %v", addErr)
+		} else if !errors.Is(addErr, streamerrors.ErrKeyCountMismatch) {
+			t.Errorf("Expected ErrKeyCountMismatch, got: %v", addErr)
 		}
 	})
 }
