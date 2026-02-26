@@ -133,7 +133,7 @@ func benchMmap(dir string, numEntries int64, numBlocks int) {
 
 	// Write phase: random writes to per-block regions
 	writeStart := time.Now()
-	for i := int64(0); i < numEntries; i++ {
+	for range numEntries {
 		blockID := rng.Uint32N(uint32(numBlocks))
 		pos := int64(blockID)*regionSize + int64(counter[blockID])*entrySize
 		binary.LittleEndian.PutUint64(data[pos:], rng.Uint64())
@@ -267,7 +267,7 @@ func benchPartition(dir string, numEntries int64, numBlocks, numPartitions, buff
 
 	// Write phase
 	writeStart := time.Now()
-	for i := int64(0); i < numEntries; i++ {
+	for range numEntries {
 		blockID := rng.Uint32N(uint32(numBlocks))
 		buffer = append(buffer, bufferedEntry{
 			k0:      rng.Uint64(),
@@ -407,7 +407,7 @@ func benchPartitionWriteOnly(dir string, numEntries int64, numBlocks, numPartiti
 	}
 
 	writeStart := time.Now()
-	for i := int64(0); i < numEntries; i++ {
+	for range numEntries {
 		blockID := rng.Uint32N(uint32(numBlocks))
 		buffer = append(buffer, bufferedEntry{
 			k0:      rng.Uint64(),

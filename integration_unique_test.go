@@ -539,7 +539,7 @@ func TestRapidOpenClose(t *testing.T) {
 
 func TestFingerprintWithVeryShortKeys(t *testing.T) {
 	// Test 16-byte keys (minimum size) with fingerprint
-	// For 16-byte keys, fingerprint is extracted by the unified mixer (not from trailing bytes)
+	// For 16-byte keys (minimum size), fingerprint is extracted by the unified mixer.
 	fpSizes := []int{1, 2, 4}
 	for _, fpSize := range fpSizes {
 		t.Run(fmt.Sprintf("fp=%d", fpSize), func(t *testing.T) {
@@ -613,7 +613,7 @@ func TestSameK1DifferentK0(t *testing.T) {
 
 	idx := buildAndOpen(t, keys, payloads,
 		WithFingerprint(4), WithPayload(4),
-		WithAlgorithm(AlgoPTRHash), WithUnsortedInput(), WithTempDir(t.TempDir()))
+		WithAlgorithm(AlgoPTRHash), WithUnsortedInput(TempDir(t.TempDir())))
 	defer idx.Close()
 
 	for i, key := range keys {
@@ -628,16 +628,10 @@ func TestSameK1DifferentK0(t *testing.T) {
 	}
 }
 
-// TestHybridFingerprintKeyLengths verifies fingerprint extraction for edge case
-// key lengths across all fingerprint sizes. The boundary between trailing-bytes
-// and mixer paths shifts with fpSize: trailing bytes are used when
-// len(key) - 16 >= fpSize, otherwise the unified mixer is used.
-//
-// Boundary per fpSize:
-//   - fpSize=1: 17B trailing, 16B mixer
-//   - fpSize=2: 18B trailing, 17B mixer
-//   - fpSize=4: 20B trailing, 19B mixer
-func TestHybridFingerprintKeyLengths(t *testing.T) {
+// TestFingerprintKeyLengths verifies fingerprint extraction works correctly
+// across different key lengths and fingerprint sizes. All key lengths use the
+// unified mixer (extractFingerprint(k0, k1, fpSize)).
+func TestFingerprintKeyLengths(t *testing.T) {
 	type testCase struct {
 		keyLen int
 		name   string
@@ -648,23 +642,23 @@ func TestHybridFingerprintKeyLengths(t *testing.T) {
 		cases  []testCase
 	}{
 		{1, []testCase{
-			{16, "16B_uses_mixer"},
-			{17, "17B_uses_key_end"}, // boundary: 17-16=1 >= 1
-			{24, "24B_uses_key_end"},
+			{16, "16B_min"},
+			{17, "17B"},
+			{24, "24B"},
 		}},
 		{2, []testCase{
-			{16, "16B_uses_mixer"},
-			{17, "17B_uses_mixer"},   // 17-16=1 < 2
-			{18, "18B_uses_key_end"}, // boundary: 18-16=2 >= 2
-			{24, "24B_uses_key_end"},
+			{16, "16B_min"},
+			{17, "17B"},
+			{18, "18B"},
+			{24, "24B"},
 		}},
 		{4, []testCase{
-			{16, "16B_uses_mixer"},
-			{17, "17B_uses_mixer"},
-			{18, "18B_uses_mixer"},
-			{19, "19B_uses_mixer"},   // 19-16=3 < 4
-			{20, "20B_uses_key_end"}, // boundary: 20-16=4 >= 4
-			{24, "24B_uses_key_end"},
+			{16, "16B_min"},
+			{17, "17B"},
+			{18, "18B"},
+			{19, "19B"},
+			{20, "20B"},
+			{24, "24B"},
 		}},
 	}
 
@@ -697,8 +691,7 @@ func TestHybridFingerprintKeyLengths(t *testing.T) {
 
 					idx := buildAndOpen(t, keys, payloads,
 						WithFingerprint(fpCfg.fpSize), WithPayload(4),
-						WithAlgorithm(algo.algo), WithUnsortedInput(),
-						WithTempDir(t.TempDir()))
+						WithAlgorithm(algo.algo), WithUnsortedInput(TempDir(t.TempDir())))
 					defer idx.Close()
 
 					for i, key := range keys {

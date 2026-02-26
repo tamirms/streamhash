@@ -1289,7 +1289,7 @@ Error names below are from the reference implementation; other implementations m
 | ErrInvalidMagic | Magic ≠ 0x53544D48 | Reject file |
 | ErrInvalidVersion | Version ≠ 0x0001 | Reject file |
 | ErrChecksumFailed | Footer hash mismatch | Reject file |
-| ErrFingerprintMismatch | Fingerprint doesn't match (non-member query) | Return "not found" |
+| ErrNotFound | Key not found (empty block or fingerprint mismatch) | Return "not found" |
 | ErrCorruptedIndex | Invalid metadata or out-of-bounds | Reject |
 | ErrTruncatedFile | File shorter than expected | Reject |
 

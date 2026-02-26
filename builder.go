@@ -239,15 +239,8 @@ func (b *Builder) AddKey(key []byte, payload uint64) error {
 	prefix := bits.ReverseBytes64(k0) // Big-endian for monotonic routing
 	blockIdx := intbits.FastRange32(prefix, b.numBlocks)
 
-	// Inline fpSize==0 fast path to avoid function call overhead (~5ns × N keys).
-	// extractFingerprintHybrid is too complex to inline (cost 139 > budget 80).
-	var fingerprint uint32
-	if b.cfg.fingerprintSize > 0 {
-		fingerprint = b.extractFingerprintHybrid(key, k0, k1)
-	}
-
 	if b.unsortedBuf != nil {
-		if b.unsortedBuf.addKey(k0, k1, payload, fingerprint, blockIdx) {
+		if b.unsortedBuf.addKey(k0, k1, payload, blockIdx) {
 			if err := b.unsortedBuf.flush(); err != nil {
 				return err
 			}
@@ -263,11 +256,14 @@ func (b *Builder) AddKey(key []byte, payload uint64) error {
 	}
 	b.lastBlockID = int64(blockIdx)
 
-	// Call the appropriate add function
+	// Call the appropriate add function.
+	// Fingerprint is computed here for single-threaded mode; parallel mode
+	// defers fingerprint computation to workers (not stored in routedEntry).
 	var err error
 	if b.workers > 1 {
-		err = b.addKeyParallel(k0, k1, payload, fingerprint, blockIdx)
+		err = b.addKeyParallel(k0, k1, payload, blockIdx)
 	} else {
+		fingerprint := extractFingerprint(k0, k1, b.cfg.fingerprintSize)
 		err = b.addKeySingleThreaded(k0, k1, payload, fingerprint, blockIdx)
 	}
 
@@ -339,28 +335,6 @@ func (b *Builder) commitEmptyBlock() {
 // estimateMetadataSize returns max metadata size for the current block.
 func (b *Builder) estimateMetadataSize() int {
 	return b.builder.MaxMetadataSizeForCurrentBlock()
-}
-
-// extractFingerprintHybrid extracts fingerprint using hybrid strategy:
-// - Keys > 16 bytes: use trailing bytes (completely independent of k0/k1)
-// - Keys == 16 bytes: use unified mixer over both k0 and k1
-//
-// This ensures fingerprints are independent of bucket/slot assignment for maximum
-// collision resistance. The unified mixer (k0 ^ (k1 * C)) depends on both hash
-// halves, making extraction algorithm-independent. See extractFingerprint for the
-// uniformity proof.
-func (b *Builder) extractFingerprintHybrid(key []byte, k0, k1 uint64) uint32 {
-	fpSize := b.cfg.fingerprintSize
-	if fpSize == 0 {
-		return 0
-	}
-	extraBytes := len(key) - 16
-	if extraBytes >= fpSize {
-		// Use trailing bytes beyond k0/k1 - completely independent
-		return unpackFingerprintFromBytes(key[len(key)-fpSize:], fpSize)
-	}
-	// Use unified mixer for 16-byte keys (or insufficient trailing bytes)
-	return extractFingerprint(k0, k1, fpSize)
 }
 
 // Finish completes the index and writes it to disk.

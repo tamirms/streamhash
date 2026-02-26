@@ -78,7 +78,7 @@ func TestIntegrationMatrix(t *testing.T) {
 	}{
 		{"sorted", func(t *testing.T) []BuildOption { return nil }},
 		{"unsorted", func(t *testing.T) []BuildOption {
-			return []BuildOption{WithUnsortedInput(), WithTempDir(t.TempDir())}
+			return []BuildOption{WithUnsortedInput(TempDir(t.TempDir()))}
 		}},
 		{"parallel", func(t *testing.T) []BuildOption {
 			return []BuildOption{WithWorkers(4)}
@@ -193,7 +193,7 @@ func TestIntegrationMatrixClustered(t *testing.T) {
 	}{
 		{"sorted", func(t *testing.T) []BuildOption { return nil }},
 		{"unsorted", func(t *testing.T) []BuildOption {
-			return []BuildOption{WithUnsortedInput(), WithTempDir(t.TempDir())}
+			return []BuildOption{WithUnsortedInput(TempDir(t.TempDir()))}
 		}},
 		{"parallel", func(t *testing.T) []BuildOption {
 			return []BuildOption{WithWorkers(4)}

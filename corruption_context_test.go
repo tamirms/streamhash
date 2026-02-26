@@ -256,7 +256,7 @@ func TestContextCancellation(t *testing.T) {
 			}
 		}
 
-		err := buildParallelBytes(ctx, indexPath, keyIter, WithTempDir(tmpDir))
+		err := buildParallelBytes(ctx, indexPath, keyIter)
 		if err == nil {
 			os.Remove(indexPath)
 		} else if !errors.Is(err, context.Canceled) {
@@ -300,7 +300,7 @@ func TestContextCancellation(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 
 				builder, err := NewBuilder(ctx, output, uint64(numKeys),
-					WithUnsortedInput(), WithPayload(4), WithWorkers(workers), WithTempDir(tmpDir))
+					WithUnsortedInput(TempDir(tmpDir)), WithPayload(4), WithWorkers(workers))
 				if err != nil {
 					t.Fatalf("NewBuilder failed: %v", err)
 				}

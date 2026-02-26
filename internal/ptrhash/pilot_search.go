@@ -460,7 +460,7 @@ func (s *solver) hasNoDuplicateSlots(slots []uint16) bool {
 	for i := range n {
 		slot := slots[i]
 		if s.slotGen[slot] == localGen {
-			for j := 0; j < i; j++ {
+			for j := range i {
 				s.slotGen[slots[j]] = 0
 			}
 			return false

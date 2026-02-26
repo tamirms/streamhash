@@ -131,7 +131,7 @@ func TestBuildModeEquivalence(t *testing.T) {
 
 				// Build unsorted (single-threaded)
 				unsortedPath := filepath.Join(tmpDir, "unsorted.idx")
-				unsortedOpts := append([]BuildOption{WithUnsortedInput(), WithWorkers(1), WithTempDir(tmpDir)}, opts...)
+				unsortedOpts := append([]BuildOption{WithUnsortedInput(TempDir(tmpDir)), WithWorkers(1)}, opts...)
 				builderU, err := NewBuilder(ctx, unsortedPath, uint64(numKeys), unsortedOpts...)
 				if err != nil {
 					t.Fatal(err)
@@ -148,7 +148,7 @@ func TestBuildModeEquivalence(t *testing.T) {
 
 				// Build unsorted (parallel)
 				unsortedParPath := filepath.Join(tmpDir, "unsorted_par.idx")
-				unsortedParOpts := append([]BuildOption{WithUnsortedInput(), WithWorkers(4), WithTempDir(tmpDir)}, opts...)
+				unsortedParOpts := append([]BuildOption{WithUnsortedInput(TempDir(tmpDir)), WithWorkers(4)}, opts...)
 				builderUP, err := NewBuilder(ctx, unsortedParPath, uint64(numKeys), unsortedParOpts...)
 				if err != nil {
 					t.Fatal(err)
@@ -618,7 +618,7 @@ func TestUnsortedReplayCloseAfterFailedFinish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	builder, err := NewBuilder(ctx, output, uint64(numKeys),
-		WithUnsortedInput(), WithPayload(4), WithTempDir(tmpDir))
+		WithUnsortedInput(TempDir(tmpDir)), WithPayload(4))
 	if err != nil {
 		t.Fatal(err)
 	}

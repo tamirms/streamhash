@@ -1,9 +1,10 @@
 // framework_test.go tests the framework infrastructure of the streamhash package:
-// prefix extraction, block routing, unsorted buffering, serialization (header,
-// footer, pack/unpack), PreHash, index accessors, stats, fingerprint extraction,
-// fingerprint separation verification, and empty-block dispatch. These are
-// functions that don't individually warrant separate files but share the same
-// test binary.
+// prefix extraction, block routing, serialization (header, footer, pack/unpack),
+// PreHash, index accessors, stats, fingerprint extraction, fingerprint separation
+// verification, and empty-block dispatch. These are functions that don't
+// individually warrant separate files but share the same test binary.
+//
+// Unsorted buffer tests live in builder_unsorted_test.go.
 package streamhash
 
 import (
@@ -13,7 +14,6 @@ import (
 	"hash/fnv"
 	"math"
 	randv2 "math/rand/v2"
-	"os"
 	"slices"
 	"testing"
 )
@@ -23,6 +23,23 @@ const (
 	testSeed1 = 0x1234567890ABCDEF
 	testSeed2 = 0xFEDCBA9876543210
 )
+
+// packFingerprintToBytes writes a uint32 fingerprint to a byte slice.
+// Test-only helper; production code uses unpackFingerprintFromBytes for reading.
+func packFingerprintToBytes(dst []byte, fp uint32, size int) {
+	switch size {
+	case 1:
+		dst[0] = byte(fp)
+	case 2:
+		binary.LittleEndian.PutUint16(dst, uint16(fp))
+	case 4:
+		binary.LittleEndian.PutUint32(dst, fp)
+	default:
+		for i := 0; i < size && i < 4; i++ {
+			dst[i] = byte(fp >> (i * 8))
+		}
+	}
+}
 
 func newTestRNG(t testing.TB) *randv2.Rand {
 	t.Helper()
@@ -194,381 +211,6 @@ func TestBlockOrderWithExtractPrefix(t *testing.T) {
 }
 
 // =============================================================================
-// UnsortedBuffer tests
-// =============================================================================
-
-// TestUnsortedBuffer_FlushAndReadPartition tests the partition flush round-trip:
-// addKey → flush → readPartition → verify all entries are recovered.
-func TestUnsortedBuffer_FlushAndReadPartition(t *testing.T) {
-	rng := newTestRNG(t)
-	configs := []struct {
-		name    string
-		payload int
-		fp      int
-	}{
-		{"payload4_fp0", 4, 0},
-		{"payload0_fp0", 0, 0},
-		{"payload4_fp2", 4, 2},
-		{"payload8_fp1", 8, 1},
-	}
-
-	for _, tc := range configs {
-		t.Run(tc.name, func(t *testing.T) {
-			numBlocks, err := numBlocksForAlgo(AlgoBijection, 1000, tc.payload, tc.fp)
-			if err != nil {
-				t.Fatalf("numBlocksForAlgo: %v", err)
-			}
-
-			cfg := &buildConfig{
-				totalKeys:       1000,
-				payloadSize:     tc.payload,
-				fingerprintSize: tc.fp,
-				tempDir:         t.TempDir(),
-			}
-
-			u, err := newUnsortedBuffer(cfg, numBlocks)
-			if err != nil {
-				t.Fatalf("newUnsortedBuffer: %v", err)
-			}
-			defer u.cleanup()
-
-			type testEntry struct {
-				k0, k1      uint64
-				payload     uint64
-				fingerprint uint32
-				blockID     uint32
-			}
-			var entries []testEntry
-			for i := range 100 {
-				key := make([]byte, 16)
-				binary.LittleEndian.PutUint64(key[0:8], rng.Uint64())
-				binary.LittleEndian.PutUint64(key[8:16], rng.Uint64())
-				k0 := binary.LittleEndian.Uint64(key[0:8])
-				k1 := binary.LittleEndian.Uint64(key[8:16])
-				var payload uint64
-				if tc.payload > 0 && tc.payload < 8 {
-					payload = uint64(i) & ((1 << (tc.payload * 8)) - 1)
-				} else if tc.payload == 8 {
-					payload = uint64(i)
-				}
-				var fp uint32
-				if tc.fp > 0 {
-					fp = uint32(i) & ((1 << (tc.fp * 8)) - 1)
-				}
-				prefix := extractPrefix(key)
-				blockID := blockIndexFromPrefix(prefix, numBlocks)
-				entries = append(entries, testEntry{k0, k1, payload, fp, blockID})
-			}
-
-			for _, e := range entries {
-				if u.addKey(e.k0, e.k1, e.payload, e.fingerprint, e.blockID) {
-					if err := u.flush(); err != nil {
-						t.Fatalf("flush: %v", err)
-					}
-				}
-			}
-
-			// Flush and read back via partitions
-			if err := u.prepareForRead(); err != nil {
-				t.Fatalf("prepareForRead: %v", err)
-			}
-
-			// Read all partitions and collect entries by blockID
-			recovered := make(map[uint32][]routedEntry)
-			for p := range u.numPartitions {
-				blockEntries, err := u.readPartition(p, nil)
-				if err != nil {
-					t.Fatalf("readPartition(%d): %v", p, err)
-				}
-				partStartBlock := p * u.blocksPerPart
-				for localIdx, entries := range blockEntries {
-					blockID := uint32(partStartBlock + localIdx)
-					recovered[blockID] = append(recovered[blockID], entries...)
-				}
-			}
-
-			// Verify all entries are recovered
-			for _, e := range entries {
-				found := false
-				for _, got := range recovered[e.blockID] {
-					if got.k0 == e.k0 && got.k1 == e.k1 {
-						if got.payload != e.payload {
-							t.Errorf("payload mismatch: got %d, want %d", got.payload, e.payload)
-						}
-						if got.fingerprint != e.fingerprint {
-							t.Errorf("fingerprint mismatch: got %d, want %d", got.fingerprint, e.fingerprint)
-						}
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("entry not found: k0=%x k1=%x blockID=%d", e.k0, e.k1, e.blockID)
-				}
-			}
-		})
-	}
-}
-
-// TestUnsortedBuffer_FastPath tests that small datasets that fit entirely
-// in the flush buffer skip file I/O (fast path).
-func TestUnsortedBuffer_FastPath(t *testing.T) {
-	numKeys := uint64(50) // Very small, fits in any flush buffer
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{
-		totalKeys:   numKeys,
-		payloadSize: 4,
-		tempDir:     t.TempDir(),
-	}
-
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	rng := newTestRNG(t)
-	for i := range int(numKeys) {
-		key := make([]byte, 16)
-		fillFromRNG(rng, key)
-		k0 := binary.LittleEndian.Uint64(key[0:8])
-		k1 := binary.LittleEndian.Uint64(key[8:16])
-		prefix := extractPrefix(key)
-		blockID := blockIndexFromPrefix(prefix, numBlocks)
-		if u.addKey(k0, k1, uint64(i), 0, blockID) {
-			if err := u.flush(); err != nil {
-				t.Fatalf("flush %d: %v", i, err)
-			}
-		}
-	}
-
-	// After adding all keys, flushed should still be false (fast path)
-	if u.flushed {
-		t.Error("expected flushed=false for small dataset (fast path)")
-	}
-	// partDir is created eagerly (for early temp dir validation),
-	// but no partition files should exist yet
-	if u.partDir == "" {
-		t.Error("expected partDir to be set")
-	} else {
-		entries, err := os.ReadDir(u.partDir)
-		if err != nil {
-			t.Fatalf("ReadDir: %v", err)
-		}
-		if len(entries) > 0 {
-			t.Errorf("expected empty partDir (fast path), got %d files", len(entries))
-		}
-	}
-}
-
-// TestUnsortedBuffer_LastPartitionBoundary tests off-by-one handling
-// for the last partition when numBlocks is not evenly divisible by blocksPerPart.
-func TestUnsortedBuffer_LastPartitionBoundary(t *testing.T) {
-	// Use enough keys to get multiple partitions with a small memory budget
-	numKeys := uint64(5000)
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 0, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{
-		totalKeys:            numKeys,
-		tempDir:              t.TempDir(),
-		unsortedMemoryBudget: 4096, // Very small to force many partitions
-	}
-
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	// Verify partition layout covers all blocks
-	lastPartStart := (u.numPartitions - 1) * u.blocksPerPart
-	lastPartEnd := lastPartStart + u.blocksPerPart
-	if lastPartEnd < int(numBlocks) {
-		t.Errorf("last partition ends at block %d but numBlocks=%d", lastPartEnd, numBlocks)
-	}
-
-	// Verify partitionID for last block maps to last partition
-	lastBlockPartID := u.partitionID(numBlocks - 1)
-	if lastBlockPartID != u.numPartitions-1 {
-		t.Errorf("last block (ID=%d) maps to partition %d, expected %d",
-			numBlocks-1, lastBlockPartID, u.numPartitions-1)
-	}
-}
-
-// TestUnsortedBuffer_EmptyPartitions tests handling of partition files
-// that have no entries (empty or non-existent).
-func TestUnsortedBuffer_EmptyPartitions(t *testing.T) {
-	numKeys := uint64(5000)
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 0, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{
-		totalKeys:            numKeys,
-		tempDir:              t.TempDir(),
-		unsortedMemoryBudget: 4096, // Small budget → many partitions
-	}
-
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	// Don't add any keys, just flush (creating partition dir)
-	if err := u.flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-
-	// Read back — all partitions should return empty block slices
-	for p := range u.numPartitions {
-		blockEntries, err := u.readPartition(p, nil)
-		if err != nil {
-			t.Fatalf("readPartition(%d): %v", p, err)
-		}
-		for localIdx, entries := range blockEntries {
-			if len(entries) > 0 {
-				t.Errorf("partition %d block %d: expected 0 entries, got %d",
-					p, localIdx, len(entries))
-			}
-		}
-	}
-}
-
-// TestUnsortedBuffer_CorruptionDetection verifies that readPartition detects
-// entries whose recomputed blockID falls outside the partition's block range.
-func TestUnsortedBuffer_CorruptionDetection(t *testing.T) {
-	numKeys := uint64(10000)
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, numKeys, 0, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{
-		totalKeys: numKeys,
-		tempDir:   t.TempDir(),
-	}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	if u.numPartitions < 2 {
-		t.Skip("need at least 2 partitions for corruption test")
-	}
-
-	// Find a key that routes to the last partition's block range
-	rng := newTestRNG(t)
-	lastPartStart := (u.numPartitions - 1) * u.blocksPerPart
-	var corruptK0, corruptK1 uint64
-	found := false
-	for attempt := 0; attempt < 100000; attempt++ {
-		key := make([]byte, 16)
-		fillFromRNG(rng, key)
-		k0 := binary.LittleEndian.Uint64(key[0:8])
-		prefix := extractPrefix(key)
-		blockID := blockIndexFromPrefix(prefix, numBlocks)
-		if int(blockID) >= lastPartStart {
-			corruptK0 = k0
-			corruptK1 = binary.LittleEndian.Uint64(key[8:16])
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("could not find a key routing to the last partition")
-	}
-
-	// Write this entry into partition 0's file (it should be in the last partition)
-	entryBuf := make([]byte, u.entrySize)
-	binary.LittleEndian.PutUint64(entryBuf[0:8], corruptK0)
-	binary.LittleEndian.PutUint64(entryBuf[8:16], corruptK1)
-	if err := os.WriteFile(u.partPaths[0], entryBuf, 0600); err != nil {
-		t.Fatalf("write corrupt partition: %v", err)
-	}
-
-	// readPartition should detect the misplaced entry
-	_, err = u.readPartition(0, nil)
-	if err == nil {
-		t.Fatal("expected error for corrupt partition (blockID outside range), got nil")
-	}
-	if !bytes.Contains([]byte(err.Error()), []byte("outside range")) {
-		t.Errorf("expected 'outside range' in error, got: %v", err)
-	}
-}
-
-func TestUnsortedBuffer_CleanupIdempotent(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 1000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 1000, payloadSize: 4, tempDir: t.TempDir()}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-
-	// Force a flush to create partition directory
-	if err := u.flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-
-	if err := u.cleanup(); err != nil {
-		t.Fatalf("first cleanup: %v", err)
-	}
-
-	if err := u.cleanup(); err != nil {
-		t.Fatalf("second cleanup: %v", err)
-	}
-}
-
-func TestUnsortedBuffer_CleanupRemovesPartDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 1000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 1000, payloadSize: 4, tempDir: tmpDir}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-
-	// Force flush to create partition directory
-	if err := u.flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-
-	partDir := u.partDir
-	if partDir == "" {
-		t.Fatal("expected partDir to be set after flush")
-	}
-
-	if err := u.cleanup(); err != nil {
-		t.Fatalf("cleanup: %v", err)
-	}
-
-	if _, err := os.Stat(partDir); !os.IsNotExist(err) {
-		t.Errorf("partition directory still exists after cleanup: %s", partDir)
-	}
-
-	if u.partDir != "" {
-		t.Error("partDir should be empty after cleanup")
-	}
-}
-
-// =============================================================================
 // DispatchEmptyBlock and VerifyFingerprint direct tests
 // =============================================================================
 
@@ -589,7 +231,7 @@ func TestDispatchEmptyBlockDirect(t *testing.T) {
 		binary.BigEndian.PutUint64(src[:8], 0x1234567890ABCDEF)
 		binary.BigEndian.PutUint64(src[8:16], 0x0FEDCBA987654321)
 		key := PreHash(src)
-		_ = builder.AddKey(key, 0)
+		_ = builder.AddKey(key, 0) // Error ignored; test verifies dispatchEmptyBlock below.
 
 		cancel()
 
@@ -677,7 +319,7 @@ func TestVerifyFingerprintSeparatedDirect(t *testing.T) {
 		}
 		k0 := binary.LittleEndian.Uint64(keys[0][0:8])
 		k1 := binary.LittleEndian.Uint64(keys[0][8:16])
-		match, err := idx.verifyFingerprintSeparated(keys[0], k0, k1, rank)
+		match, err := idx.verifyFingerprintSeparated(k0, k1, rank)
 		if err != nil {
 			t.Errorf("Unexpected error: %v", err)
 		}
@@ -692,13 +334,12 @@ func TestVerifyFingerprintSeparatedDirect(t *testing.T) {
 		binary.BigEndian.PutUint64(nonMember[0:8], 0xDEADDEADDEADDEAD)
 		binary.BigEndian.PutUint64(nonMember[8:16], 0xBEEFBEEFBEEFBEEF)
 
-		// Query to get its rank (it will land on some slot since there's no fp check yet)
 		k0 := binary.LittleEndian.Uint64(nonMember[0:8])
 		k1 := binary.LittleEndian.Uint64(nonMember[8:16])
 
-		// Use rank 0 — the fingerprint at slot 0 belongs to a member key,
+		// Test with rank 0 — the fingerprint at slot 0 belongs to a member key,
 		// so a non-member key's fingerprint should almost certainly not match.
-		match, err := idx.verifyFingerprintSeparated(nonMember, k0, k1, 0)
+		match, err := idx.verifyFingerprintSeparated(k0, k1, 0)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}

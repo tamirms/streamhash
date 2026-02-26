@@ -39,10 +39,9 @@ var (
 
 // Query errors
 var (
-	ErrIndexClosed         = errors.New("streamhash: index is closed")
-	ErrNoPayload           = errors.New("streamhash: index has no payload data")
-	ErrNotFound            = errors.New("streamhash: key not found")
-	ErrFingerprintMismatch = errors.New("streamhash: fingerprint mismatch")
+	ErrIndexClosed = errors.New("streamhash: index is closed")
+	ErrNoPayload   = errors.New("streamhash: index has no payload data")
+	ErrNotFound    = errors.New("streamhash: key not found")
 )
 
 // Internal errors (used by algorithm implementations)

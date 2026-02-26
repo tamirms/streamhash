@@ -432,9 +432,8 @@ func TestUnsortedBuilder_KeyTooShort(t *testing.T) {
 	tmpDir := t.TempDir()
 	output := filepath.Join(tmpDir, "unsorted_short.idx")
 	builder, err := NewBuilder(ctx, output, 100,
-		WithUnsortedInput(),
+		WithUnsortedInput(TempDir(tmpDir)),
 		WithPayload(4),
-		WithTempDir(tmpDir),
 	)
 	if err != nil {
 		t.Fatalf("NewBuilder failed: %v", err)
@@ -453,9 +452,8 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 	t.Run("UnsortedTooFewKeys", func(t *testing.T) {
 		output := filepath.Join(tmpDir, "unsorted_toofew.idx")
 		builder, err := NewBuilder(ctx, output, 100,
-			WithUnsortedInput(),
+			WithUnsortedInput(TempDir(tmpDir)),
 			WithPayload(4),
-			WithTempDir(tmpDir),
 		)
 		if err != nil {
 			t.Fatalf("NewBuilder failed: %v", err)
@@ -479,9 +477,8 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 	t.Run("UnsortedTooManyKeys", func(t *testing.T) {
 		output := filepath.Join(tmpDir, "unsorted_toomany.idx")
 		builder, err := NewBuilder(ctx, output, 50,
-			WithUnsortedInput(),
+			WithUnsortedInput(TempDir(tmpDir)),
 			WithPayload(4),
-			WithTempDir(tmpDir),
 		)
 		if err != nil {
 			t.Fatalf("NewBuilder failed: %v", err)
@@ -514,8 +511,7 @@ func TestUnsortedModeInvalidTempDir(t *testing.T) {
 	indexPath := filepath.Join(tmpDir, "test.idx")
 	ctx := context.Background()
 	_, err := NewBuilder(ctx, indexPath, 100,
-		WithUnsortedInput(),
-		WithTempDir("/nonexistent/directory"),
+		WithUnsortedInput(TempDir("/nonexistent/directory")),
 	)
 	if err == nil {
 		t.Error("Expected error for invalid temp directory")
@@ -532,8 +528,7 @@ func TestUnsortedModeReadOnlyTempDir(t *testing.T) {
 	indexPath := filepath.Join(tmpDir, "test.idx")
 	ctx := context.Background()
 	_, err := NewBuilder(ctx, indexPath, 100,
-		WithUnsortedInput(),
-		WithTempDir(readOnlyDir),
+		WithUnsortedInput(TempDir(readOnlyDir)),
 	)
 	if err == nil {
 		t.Error("Expected error for read-only temp directory")
@@ -987,12 +982,12 @@ func TestErrChecksumFailed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F9: ErrFingerprintMismatch (index.go:295)
+// F9: Non-member rejection via ErrNotFound (index.go:269,297)
 // ---------------------------------------------------------------------------
 
-func TestErrFingerprintMismatch(t *testing.T) {
+func TestNonMemberRejection(t *testing.T) {
 	tmpDir := t.TempDir()
-	indexPath := filepath.Join(tmpDir, "fpmismatch.idx")
+	indexPath := filepath.Join(tmpDir, "nonmember.idx")
 	ctx := context.Background()
 
 	// Build an index with fingerprints enabled.
@@ -1011,9 +1006,8 @@ func TestErrFingerprintMismatch(t *testing.T) {
 	defer idx.Close()
 
 	// Query many non-member keys. With 2-byte fingerprints (FPR ~ 1/65536),
-	// virtually all should fail with either ErrFingerprintMismatch or ErrNotFound.
+	// virtually all should fail with ErrNotFound.
 	numProbes := 1000
-	mismatchCount := 0
 	notFoundCount := 0
 	otherErrCount := 0
 	for i := range numProbes {
@@ -1022,9 +1016,7 @@ func TestErrFingerprintMismatch(t *testing.T) {
 		fillFromRNG(rng, nonMember[8:])
 
 		_, err := idx.Query(nonMember)
-		if errors.Is(err, streamerrors.ErrFingerprintMismatch) {
-			mismatchCount++
-		} else if errors.Is(err, streamerrors.ErrNotFound) {
+		if errors.Is(err, streamerrors.ErrNotFound) {
 			notFoundCount++
 		} else if err != nil {
 			otherErrCount++
@@ -1032,23 +1024,14 @@ func TestErrFingerprintMismatch(t *testing.T) {
 		// err == nil means false positive (non-member accepted), expected to be rare
 	}
 
-	// At least one non-member should trigger ErrFingerprintMismatch.
-	// With 500 keys, 1000 probes, and 2-byte FP, the vast majority of keys
-	// that map to a non-empty block will hit a fingerprint mismatch.
-	if mismatchCount == 0 {
-		t.Errorf("Expected at least one ErrFingerprintMismatch among %d non-member probes; "+
-			"got %d NotFound, %d other errors", numProbes, notFoundCount, otherErrCount)
-	}
-
 	// No unexpected error types should occur.
 	if otherErrCount > 0 {
-		t.Errorf("got %d unexpected errors (not ErrFingerprintMismatch or ErrNotFound)", otherErrCount)
+		t.Errorf("got %d unexpected errors (not ErrNotFound)", otherErrCount)
 	}
 
-	// Virtually all non-member queries should be rejected (mismatch + notfound).
-	totalRejected := mismatchCount + notFoundCount
-	if totalRejected < numProbes*9/10 {
-		t.Errorf("Non-member rejection too low: %d/%d rejected", totalRejected, numProbes)
+	// Virtually all non-member queries should be rejected.
+	if notFoundCount < numProbes*9/10 {
+		t.Errorf("Non-member rejection too low: %d/%d rejected", notFoundCount, numProbes)
 	}
 }
 

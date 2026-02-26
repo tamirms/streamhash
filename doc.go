@@ -45,5 +45,5 @@
 //   - Key routing: key.go (prefix extraction, fastRange), prehash.go (PreHash)
 //   - Algorithm dispatch: algorithm.go (blockBuilder/blockDecoder interfaces, factory functions)
 //   - Block algorithms: internal/bijection/ (EF/GR), internal/ptrhash/ (Cuckoo)
-//   - Platform: fallocate_*.go, prefault_*.go (OS-specific optimizations)
+//   - Platform: fallocate_*.go, fadvise_*.go (OS-specific optimizations)
 package streamhash

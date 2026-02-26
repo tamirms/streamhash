@@ -46,8 +46,6 @@ func TestMemoryBudgetAccuracy(t *testing.T) {
 			tmpDir := t.TempDir()
 			ctx := context.Background()
 
-			budget := tc.budgetMB << 20
-
 			rng := newTestRNG(t)
 			keys := generateRandomKeys(rng, tc.numKeys, tc.keySize)
 
@@ -59,10 +57,8 @@ func TestMemoryBudgetAccuracy(t *testing.T) {
 			}
 
 			opts := []BuildOption{
-				WithUnsortedInput(),
+				WithUnsortedInput(TempDir(tmpDir)),
 				WithWorkers(1),
-				WithTempDir(tmpDir),
-				WithUnsortedMemoryBudget(budget),
 			}
 			if tc.payload > 0 {
 				opts = append(opts, WithPayload(tc.payload))
