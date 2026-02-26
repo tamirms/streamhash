@@ -431,7 +431,6 @@ func (u *unsortedBuffer) readPartition(p, pipelineIdx int, flatBuf []routedEntry
 	if _, err := f.Seek(0, 0); err != nil {
 		return nil, fmt.Errorf("seek partition %d: %w", p, err)
 	}
-	fadviseSequential(int(f.Fd()), 0, fileSize)
 
 	// Per-SB proportional region allocation
 	S := superblockSize
@@ -524,8 +523,6 @@ func (u *unsortedBuffer) readPartition(p, pipelineIdx int, flatBuf []routedEntry
 	}
 
 	// Close fd (file already unlinked, kernel frees pages on last fd close).
-	// Note: fadviseDontneed is intentionally omitted — on unlinked files with
-	// dirty pages, it triggers synchronous writeback blocking for hundreds of ms.
 	f.Close()
 	u.partFiles[p] = nil
 

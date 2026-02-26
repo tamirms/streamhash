@@ -1159,8 +1159,6 @@ This approach exploits the uniform key distribution assumption: entries per supe
 
 **Pipelined partition processing:** Partition P+1 is read in a background goroutine while blocks from partition P are being built. Two pipeline buffer sets (flatBuf + blockIDs) alternate between read and build.
 
-**fadvise hints:** `FADV_SEQUENTIAL` is applied before reading each partition (doubles kernel readahead window). Page cache is released implicitly when each partition fd is closed (the file is already unlinked, so the kernel frees pages on last fd close). `FADV_DONTNEED` is intentionally not used: on unlinked files with dirty pages, it triggers synchronous writeback blocking for hundreds of milliseconds.
-
 **Resource usage by scale:**
 
 | Total keys | P | Temp disk (p=0) | Temp disk (p=4) | Write RAM | Read RAM |
