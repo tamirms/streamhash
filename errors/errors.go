@@ -17,11 +17,10 @@ var (
 	ErrPayloadOverflow  = errors.New("streamhash: payload value exceeds configured PayloadSize capacity")
 	ErrDuplicateKey     = errors.New("streamhash: duplicate key detected")
 	ErrUnsortedInput    = errors.New("streamhash: input keys are not sorted")
-	ErrRegionOverflow   = errors.New("streamhash: block region capacity exceeded")
 	ErrKeyCountMismatch = errors.New("streamhash: key count mismatch")
 )
 
-// Construction errors (spec §7.5)
+// Construction errors (spec §7.2.5)
 var (
 	ErrPayloadTooLarge             = errors.New("streamhash: PayloadSize exceeds maximum 8 bytes")
 	ErrFingerprintTooLarge         = errors.New("streamhash: FingerprintSize exceeds maximum (4 bytes)")
@@ -31,18 +30,18 @@ var (
 
 // Index errors
 var (
-	ErrInvalidMagic     = errors.New("streamhash: invalid magic number")
-	ErrInvalidVersion   = errors.New("streamhash: unsupported version")
-	ErrChecksumFailed   = errors.New("streamhash: file checksum verification failed")
-	ErrTruncatedFile    = errors.New("streamhash: index file is truncated")
-	ErrCorruptedIndex   = errors.New("streamhash: index data is corrupted")
-	ErrNotFound         = errors.New("streamhash: key not found")
+	ErrInvalidMagic   = errors.New("streamhash: invalid magic number")
+	ErrInvalidVersion = errors.New("streamhash: unsupported version")
+	ErrChecksumFailed = errors.New("streamhash: file checksum verification failed")
+	ErrTruncatedFile  = errors.New("streamhash: index file is truncated")
+	ErrCorruptedIndex = errors.New("streamhash: index data is corrupted")
 )
 
 // Query errors
 var (
 	ErrIndexClosed         = errors.New("streamhash: index is closed")
 	ErrNoPayload           = errors.New("streamhash: index has no payload data")
+	ErrNotFound            = errors.New("streamhash: key not found")
 	ErrFingerprintMismatch = errors.New("streamhash: fingerprint mismatch")
 )
 
