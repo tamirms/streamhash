@@ -1122,7 +1122,7 @@ For unsorted input, the framework uses a **partition flush** architecture with b
 The build proceeds in two phases with an explicit memory transition between them:
 
 1. **Write phase** — Keys are buffered in memory, partitioned by block range, and flushed to P partition files via double-buffered I/O
-2. **Read phase** — Partition files are read back one at a time, entries are grouped by block using superblock scatter + in-place counting sort, and blocks are built sequentially
+2. **Read phase** — Partition files are read back one at a time, entries are grouped by block (see "superblock scatter" below), and blocks are built sequentially
 
 Peak memory is `max(write phase, read phase)`, not the sum, because write-phase buffers are freed before read-phase buffers are allocated.
 
