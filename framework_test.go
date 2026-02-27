@@ -1,24 +1,21 @@
 // framework_test.go tests the framework infrastructure of the streamhash package:
-// prefix extraction, block routing, unsorted buffering, serialization (header,
-// footer, pack/unpack), PreHash, index accessors, stats, fingerprint extraction,
-// fingerprint separation verification, and empty-block dispatch. These are
-// functions that don't individually warrant separate files but share the same
-// test binary.
+// prefix extraction, block routing, serialization (header, footer, pack/unpack),
+// PreHash, index accessors, stats, fingerprint extraction, fingerprint separation
+// verification, and empty-block dispatch. These are functions that don't
+// individually warrant separate files but share the same test binary.
+//
+// Unsorted buffer tests live in builder_unsorted_test.go.
 package streamhash
 
 import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"hash/fnv"
 	"math"
 	randv2 "math/rand/v2"
-	"os"
 	"slices"
 	"testing"
-
-	streamerrors "github.com/tamirms/streamhash/errors"
 )
 
 // Named seeds for deterministic reproduction.
@@ -26,6 +23,23 @@ const (
 	testSeed1 = 0x1234567890ABCDEF
 	testSeed2 = 0xFEDCBA9876543210
 )
+
+// packFingerprintToBytes writes a uint32 fingerprint to a byte slice.
+// Test-only helper; production code uses unpackFingerprintFromBytes for reading.
+func packFingerprintToBytes(dst []byte, fp uint32, size int) {
+	switch size {
+	case 1:
+		dst[0] = byte(fp)
+	case 2:
+		binary.LittleEndian.PutUint16(dst, uint16(fp))
+	case 4:
+		binary.LittleEndian.PutUint32(dst, fp)
+	default:
+		for i := 0; i < size && i < 4; i++ {
+			dst[i] = byte(fp >> (i * 8))
+		}
+	}
+}
 
 func newTestRNG(t testing.TB) *randv2.Rand {
 	t.Helper()
@@ -197,308 +211,6 @@ func TestBlockOrderWithExtractPrefix(t *testing.T) {
 }
 
 // =============================================================================
-// UnsortedBuffer tests
-// =============================================================================
-
-func TestUnsortedBuffer_RoundTrip(t *testing.T) {
-	rng := newTestRNG(t)
-	configs := []struct {
-		name    string
-		payload int
-		fp      int
-	}{
-		{"payload4_fp0", 4, 0},
-		{"payload0_fp0", 0, 0},
-		{"payload4_fp2", 4, 2},
-		{"payload8_fp1", 8, 1},
-	}
-
-	for _, tc := range configs {
-		t.Run(tc.name, func(t *testing.T) {
-			numBlocks, err := numBlocksForAlgo(AlgoBijection, 1000, tc.payload, tc.fp)
-			if err != nil {
-				t.Fatalf("numBlocksForAlgo: %v", err)
-			}
-
-			cfg := &buildConfig{
-				totalKeys:       1000,
-				payloadSize:     tc.payload,
-				fingerprintSize: tc.fp,
-				tempDir:         t.TempDir(),
-			}
-
-			u, err := newUnsortedBuffer(cfg, numBlocks)
-			if err != nil {
-				t.Fatalf("newUnsortedBuffer: %v", err)
-			}
-			defer u.cleanup()
-
-			type testEntry struct {
-				key         []byte
-				k0, k1      uint64
-				payload     uint64
-				fingerprint uint32
-				blockID     uint32
-			}
-			var entries []testEntry
-			for i := range 100 {
-				key := make([]byte, 16)
-				binary.LittleEndian.PutUint64(key[0:8], rng.Uint64())
-				binary.LittleEndian.PutUint64(key[8:16], rng.Uint64())
-				k0 := binary.LittleEndian.Uint64(key[0:8])
-				k1 := binary.LittleEndian.Uint64(key[8:16])
-				var payload uint64
-				if tc.payload > 0 && tc.payload < 8 {
-					payload = uint64(i) & ((1 << (tc.payload * 8)) - 1)
-				} else if tc.payload == 8 {
-					payload = uint64(i)
-				}
-				var fp uint32
-				if tc.fp > 0 {
-					fp = uint32(i) & ((1 << (tc.fp * 8)) - 1)
-				}
-				prefix := extractPrefix(key)
-				blockID := blockIndexFromPrefix(prefix, numBlocks)
-				entries = append(entries, testEntry{key, k0, k1, payload, fp, blockID})
-			}
-
-			for _, e := range entries {
-				if err := u.addKey(e.key, e.k0, e.k1, e.payload, e.fingerprint, e.blockID); err != nil {
-					t.Fatalf("addKey: %v", err)
-				}
-			}
-
-			for _, e := range entries {
-				count := u.blockCount(e.blockID)
-				found := false
-				for i := range count {
-					got := u.readEntry(e.blockID, i)
-					if got.k0 == e.k0 && got.k1 == e.k1 {
-						if got.payload != e.payload {
-							t.Errorf("payload mismatch: got %d, want %d", got.payload, e.payload)
-						}
-						if got.fingerprint != e.fingerprint {
-							t.Errorf("fingerprint mismatch: got %d, want %d", got.fingerprint, e.fingerprint)
-						}
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("entry not found: k0=%x k1=%x blockID=%d", e.k0, e.k1, e.blockID)
-				}
-			}
-		})
-	}
-}
-
-func TestUnsortedBuffer_MultipleBlocks(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 10000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 10000, payloadSize: 4, tempDir: t.TempDir()}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	rng := newTestRNG(t)
-	blockEntries := make(map[uint32]int)
-
-	for i := range 500 {
-		key := make([]byte, 16)
-		binary.LittleEndian.PutUint64(key[0:8], rng.Uint64())
-		binary.LittleEndian.PutUint64(key[8:16], rng.Uint64())
-		k0 := binary.LittleEndian.Uint64(key[0:8])
-		k1 := binary.LittleEndian.Uint64(key[8:16])
-		prefix := extractPrefix(key)
-		blockID := blockIndexFromPrefix(prefix, numBlocks)
-		payload := uint64(i)
-
-		if err := u.addKey(key, k0, k1, payload, 0, blockID); err != nil {
-			t.Fatalf("addKey: %v", err)
-		}
-		blockEntries[blockID]++
-	}
-
-	for blockID, expectedCount := range blockEntries {
-		got := u.blockCount(blockID)
-		if int(got) != expectedCount {
-			t.Errorf("block %d: got count %d, want %d", blockID, got, expectedCount)
-		}
-	}
-}
-
-func TestUnsortedBuffer_EmptyBlocks(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 10000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 10000, payloadSize: 4, tempDir: t.TempDir()}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	for blockID := range numBlocks {
-		if got := u.blockCount(blockID); got != 0 {
-			t.Errorf("block %d: expected count 0, got %d", blockID, got)
-		}
-	}
-}
-
-func TestUnsortedBuffer_RegionOverflow(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 10000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 10000, payloadSize: 4, tempDir: t.TempDir()}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-	defer u.cleanup()
-
-	sharedPrefix := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}
-	for i := uint32(0); i < u.regionCapacity; i++ {
-		key := make([]byte, 16)
-		copy(key[:8], sharedPrefix)
-		binary.BigEndian.PutUint64(key[8:], uint64(i))
-		k0 := binary.LittleEndian.Uint64(key[0:8])
-		k1 := binary.LittleEndian.Uint64(key[8:16])
-		prefix := extractPrefix(key)
-		blockID := blockIndexFromPrefix(prefix, numBlocks)
-
-		if err := u.addKey(key, k0, k1, uint64(i), 0, blockID); err != nil {
-			t.Fatalf("addKey at %d: %v", i, err)
-		}
-	}
-
-	key := make([]byte, 16)
-	copy(key[:8], sharedPrefix)
-	binary.BigEndian.PutUint64(key[8:], uint64(u.regionCapacity))
-	k0 := binary.LittleEndian.Uint64(key[0:8])
-	k1 := binary.LittleEndian.Uint64(key[8:16])
-	prefix := extractPrefix(key)
-	blockID := blockIndexFromPrefix(prefix, numBlocks)
-
-	err = u.addKey(key, k0, k1, 0, 0, blockID)
-	if !errors.Is(err, streamerrors.ErrRegionOverflow) {
-		t.Errorf("expected ErrRegionOverflow, got: %v", err)
-	}
-}
-
-// TestUnsortedBuffer_CapacityHoldsForRealKeys verifies that regionCapacity is
-// always >= the number of keys any block actually receives when distributing
-// random keys, rather than tautologically reimplementing the formula.
-func TestUnsortedBuffer_CapacityHoldsForRealKeys(t *testing.T) {
-	configs := []struct {
-		n       uint64
-		payload int
-		fp      int
-	}{
-		{1000, 4, 0},
-		{10000, 4, 0},
-		{100000, 0, 0},
-		{1000, 4, 2},
-	}
-
-	rng := newTestRNG(t)
-	for _, tc := range configs {
-		numBlocks, err := numBlocksForAlgo(AlgoBijection, tc.n, tc.payload, tc.fp)
-		if err != nil {
-			t.Fatalf("numBlocksForAlgo(%d, %d, %d): %v", tc.n, tc.payload, tc.fp, err)
-		}
-
-		bcfg := &buildConfig{totalKeys: tc.n, payloadSize: tc.payload, fingerprintSize: tc.fp, tempDir: t.TempDir()}
-		u, err := newUnsortedBuffer(bcfg, numBlocks)
-		if err != nil {
-			t.Fatalf("newUnsortedBuffer: %v", err)
-		}
-		defer u.cleanup()
-
-		// Distribute tc.n random keys and count how many land in each block
-		blockCounts := make([]int, numBlocks)
-		for i := uint64(0); i < tc.n; i++ {
-			key := make([]byte, 16)
-			fillFromRNG(rng, key)
-			prefix := extractPrefix(key)
-			blockID := blockIndexFromPrefix(prefix, numBlocks)
-			blockCounts[blockID]++
-		}
-
-		// Verify no block exceeds regionCapacity
-		for blockID, count := range blockCounts {
-			if uint32(count) > u.regionCapacity {
-				t.Errorf("n=%d block %d: %d keys > regionCapacity %d",
-					tc.n, blockID, count, u.regionCapacity)
-			}
-		}
-	}
-}
-
-func TestUnsortedBuffer_CleanupIdempotent(t *testing.T) {
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 1000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 1000, payloadSize: 4, tempDir: t.TempDir()}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-
-	if err := u.cleanup(); err != nil {
-		t.Fatalf("first cleanup: %v", err)
-	}
-
-	if err := u.cleanup(); err != nil {
-		t.Fatalf("second cleanup: %v", err)
-	}
-}
-
-func TestUnsortedBuffer_CleanupRemovesTempFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	numBlocks, err := numBlocksForAlgo(AlgoBijection, 1000, 4, 0)
-	if err != nil {
-		t.Fatalf("numBlocksForAlgo: %v", err)
-	}
-
-	cfg := &buildConfig{totalKeys: 1000, payloadSize: 4, tempDir: tmpDir}
-	u, err := newUnsortedBuffer(cfg, numBlocks)
-	if err != nil {
-		t.Fatalf("newUnsortedBuffer: %v", err)
-	}
-
-	tempPath := u.tempPath
-
-	if err := u.cleanup(); err != nil {
-		t.Fatalf("cleanup: %v", err)
-	}
-
-	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
-		t.Errorf("temp file still exists after cleanup: %s", tempPath)
-	}
-
-	if u.tempData != nil {
-		t.Error("tempData should be nil after cleanup")
-	}
-	if u.tempFile != nil {
-		t.Error("tempFile should be nil after cleanup")
-	}
-	if u.counter != nil {
-		t.Error("counter should be nil after cleanup")
-	}
-}
-
-// =============================================================================
 // DispatchEmptyBlock and VerifyFingerprint direct tests
 // =============================================================================
 
@@ -519,7 +231,7 @@ func TestDispatchEmptyBlockDirect(t *testing.T) {
 		binary.BigEndian.PutUint64(src[:8], 0x1234567890ABCDEF)
 		binary.BigEndian.PutUint64(src[8:16], 0x0FEDCBA987654321)
 		key := PreHash(src)
-		_ = builder.AddKey(key, 0)
+		_ = builder.AddKey(key, 0) // Error ignored; test verifies dispatchEmptyBlock below.
 
 		cancel()
 
@@ -607,7 +319,7 @@ func TestVerifyFingerprintSeparatedDirect(t *testing.T) {
 		}
 		k0 := binary.LittleEndian.Uint64(keys[0][0:8])
 		k1 := binary.LittleEndian.Uint64(keys[0][8:16])
-		match, err := idx.verifyFingerprintSeparated(keys[0], k0, k1, rank)
+		match, err := idx.verifyFingerprintSeparated(k0, k1, rank)
 		if err != nil {
 			t.Errorf("Unexpected error: %v", err)
 		}
@@ -622,13 +334,12 @@ func TestVerifyFingerprintSeparatedDirect(t *testing.T) {
 		binary.BigEndian.PutUint64(nonMember[0:8], 0xDEADDEADDEADDEAD)
 		binary.BigEndian.PutUint64(nonMember[8:16], 0xBEEFBEEFBEEFBEEF)
 
-		// Query to get its rank (it will land on some slot since there's no fp check yet)
 		k0 := binary.LittleEndian.Uint64(nonMember[0:8])
 		k1 := binary.LittleEndian.Uint64(nonMember[8:16])
 
-		// Use rank 0 — the fingerprint at slot 0 belongs to a member key,
+		// Test with rank 0 — the fingerprint at slot 0 belongs to a member key,
 		// so a non-member key's fingerprint should almost certainly not match.
-		match, err := idx.verifyFingerprintSeparated(nonMember, k0, k1, 0)
+		match, err := idx.verifyFingerprintSeparated(k0, k1, 0)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}

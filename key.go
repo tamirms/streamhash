@@ -31,24 +31,6 @@ func unpackFingerprintFromBytes(src []byte, size int) uint32 {
 	}
 }
 
-// packFingerprintToBytes writes a uint32 fingerprint to a byte slice.
-// Optimized for common fingerprint sizes (1, 2, 4 bytes).
-// Precondition: len(dst) >= size.
-func packFingerprintToBytes(dst []byte, fp uint32, size int) {
-	switch size {
-	case 1:
-		dst[0] = byte(fp)
-	case 2:
-		binary.LittleEndian.PutUint16(dst, uint16(fp))
-	case 4:
-		binary.LittleEndian.PutUint32(dst, fp)
-	default:
-		for i := 0; i < size && i < 4; i++ {
-			dst[i] = byte(fp >> (i * 8))
-		}
-	}
-}
-
 // packPayloadToBytes packs a uint64 payload into a byte slice.
 // Optimized for common payload sizes (4, 8 bytes).
 // Precondition: len(dst) >= size.

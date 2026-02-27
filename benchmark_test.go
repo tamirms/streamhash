@@ -543,9 +543,8 @@ func BenchmarkUnsortedBuilder(b *testing.B) {
 		output := filepath.Join(tmpDir, "bench.idx")
 
 		builder, err := NewBuilder(ctx, output, uint64(len(keys)),
-			WithUnsortedInput(),
+			WithUnsortedInput(TempDir(tmpDir)),
 			WithPayload(4),
-			WithTempDir(tmpDir),
 		)
 		if err != nil {
 			b.Fatalf("NewBuilder failed: %v", err)
@@ -579,10 +578,9 @@ func BenchmarkUnsortedBuilderParallel(b *testing.B) {
 		output := filepath.Join(tmpDir, "bench_parallel.idx")
 
 		builder, err := NewBuilder(ctx, output, uint64(len(keys)),
-			WithUnsortedInput(),
+			WithUnsortedInput(TempDir(tmpDir)),
 			WithPayload(4),
 			WithWorkers(4),
-			WithTempDir(tmpDir),
 		)
 		if err != nil {
 			b.Fatalf("NewBuilder failed: %v", err)

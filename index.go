@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/bits"
 	"os"
 	"sync/atomic"
 
@@ -225,11 +226,9 @@ func (idx *Index) Query(key []byte) (uint64, error) {
 
 // verifyFingerprintSeparated checks if the fingerprint matches.
 // Reads from the separated payload region.
-// Uses hybrid extraction: keys > 16 bytes use trailing bytes, 16-byte keys use unified mixer.
-// Preconditions:
-//   - idx.header.hasFingerprint() (callers must check)
-//   - len(key) >= 16 (guaranteed by Query)
-func (idx *Index) verifyFingerprintSeparated(key []byte, k0, k1 uint64, globalRank uint64) (bool, error) {
+// Always uses extractFingerprint(k0, k1, fpSize) for both build and query.
+// Precondition: idx.header.hasFingerprint() (callers must check).
+func (idx *Index) verifyFingerprintSeparated(k0, k1 uint64, globalRank uint64) (bool, error) {
 	fpSize := idx.header.fingerprintSizeInt()
 
 	// Get stored fingerprint from payload region
@@ -240,19 +239,7 @@ func (idx *Index) verifyFingerprintSeparated(key []byte, k0, k1 uint64, globalRa
 	}
 
 	storedFP := unpackFingerprintFromBytes(idx.data[payloadOffset:], fpSize)
-
-	// Hybrid fingerprint extraction:
-	// - Keys with enough trailing bytes (len >= 16 + fpSize): use key end
-	// - Keys without enough trailing bytes: use unified mixer
-	var expectedFP uint32
-	extraBytes := len(key) - 16
-	if extraBytes >= fpSize {
-		// Use trailing bytes beyond k0/k1 - completely independent
-		expectedFP = unpackFingerprintFromBytes(key[len(key)-fpSize:], fpSize)
-	} else {
-		// Use unified mixer for 16-byte keys (or insufficient trailing bytes)
-		expectedFP = extractFingerprint(k0, k1, fpSize)
-	}
+	expectedFP := extractFingerprint(k0, k1, fpSize)
 
 	return storedFP == expectedFP, nil
 }
@@ -265,7 +252,7 @@ func (idx *Index) queryInternal(key []byte) (uint64, error) {
 	// prefix is big-endian for monotonic block routing
 	k0 := binary.LittleEndian.Uint64(key[0:8])
 	k1 := binary.LittleEndian.Uint64(key[8:16])
-	prefix := binary.BigEndian.Uint64(key[0:8])
+	prefix := bits.ReverseBytes64(k0) // Big-endian for monotonic routing
 	blockIdx := intbits.FastRange32(prefix, idx.header.NumBlocks)
 
 	if int(blockIdx) >= len(idx.ramIndex)-1 {
@@ -302,12 +289,12 @@ func (idx *Index) queryInternal(key []byte) (uint64, error) {
 	globalRank := baseRank + uint64(localSlot)
 
 	if idx.header.hasFingerprint() {
-		ok, err := idx.verifyFingerprintSeparated(key, k0, k1, globalRank)
+		ok, err := idx.verifyFingerprintSeparated(k0, k1, globalRank)
 		if err != nil {
 			return 0, err
 		}
 		if !ok {
-			return 0, streamerrors.ErrFingerprintMismatch
+			return 0, streamerrors.ErrNotFound
 		}
 	}
 

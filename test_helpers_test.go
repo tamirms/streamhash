@@ -442,7 +442,7 @@ func verifyPayloads(t *testing.T, idx *Index, keys [][]byte, payloads []uint64, 
 }
 
 // verifyNonMemberRejection queries non-member keys and verifies they are rejected.
-// With fingerprints, most non-members should get ErrNotFound or ErrFingerprintMismatch.
+// With fingerprints, most non-members should get ErrNotFound.
 func verifyNonMemberRejection(t *testing.T, rng *rand.Rand, idx *Index, numProbes int) {
 	t.Helper()
 	rejected := 0

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/cespare/xxhash/v2"
 	"golang.org/x/sync/errgroup"
@@ -20,21 +21,21 @@ const (
 
 // routedEntry holds a key with pre-computed routing values for parallel building.
 // k0, k1 are the first 16 bytes of the key as little-endian uint64s.
-// These are pre-computed in the main goroutine for pipeline parallelism:
-// while workers are CPU-bound doing block solving, the main goroutine
-// prepares the next batch.
+// Fingerprints are computed at index-write time via extractFingerprint(k0, k1, fpSize),
+// not stored in the entry (saves 8B per entry due to alignment).
 type routedEntry struct {
-	k0          uint64 // First 8 bytes of key (little-endian)
-	k1          uint64 // Second 8 bytes of key (little-endian)
-	payload     uint64
-	fingerprint uint32
+	k0      uint64 // First 8 bytes of key (little-endian)
+	k1      uint64 // Second 8 bytes of key (little-endian)
+	payload uint64
 }
 
 // blockWork represents work to be done by a worker.
 type blockWork struct {
 	blockID    uint32
 	entries    []routedEntry
-	keysBefore uint64 // Cumulative keys before this block (for payload offset calculation)
+	pooled     bool             // true if entries was obtained from entryPool (should be returned)
+	fenceWg    *sync.WaitGroup  // if non-nil, Done() after reading entries (for flatBuf reuse fencing)
+	keysBefore uint64           // Cumulative keys before this block (for payload offset calculation)
 }
 
 // blockResult holds the result of building a block (separated layout).
@@ -85,14 +86,13 @@ func (b *Builder) initParallelWorkers() {
 // Writer errors are detected at block boundaries (dispatchBlock/dispatchEmptyBlock
 // check writerDone in their blocking select) and periodically via AddKey's context
 // check interval. This avoids per-entry channel overhead (~3-5ns × 10M keys).
-func (b *Builder) addKeyParallel(k0, k1 uint64, payload uint64, fingerprint uint32, blockIdx uint32) error {
+func (b *Builder) addKeyParallel(k0, k1 uint64, payload uint64, blockIdx uint32) error {
 	if b.firstKey {
 		// Dispatch empty blocks for indices 0 to blockIdx-1
 		for b.nextBlockToWrite < blockIdx {
 			if err := b.dispatchEmptyBlock(b.nextBlockToWrite); err != nil {
 				return err
 			}
-			b.nextBlockToWrite++
 		}
 		b.currentBlockIdx = blockIdx
 		b.firstKey = false
@@ -109,7 +109,6 @@ func (b *Builder) addKeyParallel(k0, k1 uint64, payload uint64, fingerprint uint
 			if err := b.dispatchEmptyBlock(b.nextBlockToWrite); err != nil {
 				return err
 			}
-			b.nextBlockToWrite++
 		}
 
 		b.currentBlockIdx = blockIdx
@@ -117,27 +116,35 @@ func (b *Builder) addKeyParallel(k0, k1 uint64, payload uint64, fingerprint uint
 
 	// Accumulate entry in pending block (values already parsed in AddKey)
 	b.pendingEntries = append(b.pendingEntries, routedEntry{
-		k0:          k0,
-		k1:          k1,
-		payload:     payload,
-		fingerprint: fingerprint,
+		k0:      k0,
+		k1:      k1,
+		payload: payload,
 	})
 
 	return nil
 }
 
-// dispatchBlock sends the pending block to workers for building.
+// dispatchBlock sends the pending block to workers for building (sorted mode).
+// Wraps dispatchBlockWork with pendingEntries management.
 func (b *Builder) dispatchBlock() error {
+	entries := b.pendingEntries
+	b.pendingEntries = b.getEntrySlice()
+	return b.dispatchBlockWork(b.currentBlockIdx, entries, true)
+}
+
+// dispatchBlockWork sends a block with explicit parameters to workers for building.
+// Maintains keysBefore as a running accumulator for payload offset calculation.
+// Used by both sorted mode (via dispatchBlock) and unsorted mode directly.
+// The pooled flag indicates whether entries should be returned to the pool after use.
+func (b *Builder) dispatchBlockWork(blockID uint32, entries []routedEntry, pooled bool) error {
 	work := blockWork{
-		blockID:    b.currentBlockIdx,
-		entries:    b.pendingEntries,
+		blockID:    blockID,
+		entries:    entries,
+		pooled:     pooled,
 		keysBefore: b.keysBefore,
 	}
-
-	// Get new slice for next block
-	b.pendingEntries = b.getEntrySlice()
-	b.keysBefore += uint64(len(work.entries))
-	b.nextBlockToWrite++
+	b.keysBefore += uint64(len(entries))
+	b.nextBlockToWrite = blockID + 1
 
 	select {
 	case b.workChan <- work:
@@ -151,12 +158,15 @@ func (b *Builder) dispatchBlock() error {
 }
 
 // dispatchEmptyBlock sends an empty block to workers.
+// Updates nextBlockToWrite for consistency with dispatchBlockWork.
+// keysBefore is unchanged: empty blocks have no payloads, so the payload offset is not advanced.
 func (b *Builder) dispatchEmptyBlock(blockID uint32) error {
 	work := blockWork{
 		blockID:    blockID,
 		entries:    nil,
 		keysBefore: b.keysBefore,
 	}
+	b.nextBlockToWrite = blockID + 1
 
 	select {
 	case b.workChan <- work:
@@ -177,7 +187,8 @@ func (b *Builder) runWorker() error {
 		return err
 	}
 
-	entrySize := b.cfg.payloadSize + b.cfg.fingerprintSize
+	fpSize := b.cfg.fingerprintSize
+	entrySize := b.cfg.payloadSize + fpSize
 
 	// Pre-allocate reusable payload buffer (grows as needed, reused across blocks)
 	// Metadata buffer is NOT reused because it's sent through channel
@@ -186,6 +197,10 @@ func (b *Builder) runWorker() error {
 	for work := range b.workChan {
 		select {
 		case <-b.workerCtx.Done():
+			// Release fence before returning so background readers don't deadlock.
+			if work.fenceWg != nil {
+				work.fenceWg.Done()
+			}
 			return b.workerCtx.Err()
 		default:
 		}
@@ -206,10 +221,17 @@ func (b *Builder) runWorker() error {
 			// Empty block contributes hash of empty slice (deterministic)
 			payloadHash = xxhash.Sum64(nil)
 		} else {
-			// Reset and populate the builder
+			// Reset and populate the builder, computing fingerprints from k0/k1
 			blkBuilder.Reset()
 			for _, e := range work.entries {
-				blkBuilder.AddKey(e.k0, e.k1, e.payload, e.fingerprint)
+				blkBuilder.AddKey(e.k0, e.k1, e.payload, extractFingerprint(e.k0, e.k1, fpSize))
+			}
+
+			// Signal that entries are no longer being read. This allows the
+			// flatBuf backing the entries to be safely reused for the next
+			// partition read (fencing for unsorted parallel mode).
+			if work.fenceWg != nil {
+				work.fenceWg.Done()
 			}
 
 			numKeysInBlock := len(work.entries)
@@ -245,8 +267,12 @@ func (b *Builder) runWorker() error {
 				}
 			}
 
-			// Return entry slice to pool
-			b.putEntrySlice(work.entries)
+			// Return entry slice to pool only if it was pool-allocated.
+			// Unsorted mode dispatches flatBuf-backed slices with pooled=false
+			// and uses fenceWg for lifetime management instead.
+			if work.pooled {
+				b.putEntrySlice(work.entries)
+			}
 		}
 
 		// Send result to writer (metadata + payload hash)
@@ -343,7 +369,6 @@ func (b *Builder) finishParallel() error {
 		if err := b.dispatchEmptyBlock(b.nextBlockToWrite); err != nil {
 			return errors.Join(err, b.cleanup())
 		}
-		b.nextBlockToWrite++
 	}
 
 	return b.drainParallelPipeline()

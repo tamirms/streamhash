@@ -8,17 +8,19 @@ const (
 // BuildOption is a functional option for configuring builds.
 type BuildOption func(*buildConfig)
 
+// UnsortedOption is a functional option for configuring unsorted input mode.
+type UnsortedOption func(*buildConfig)
+
 type buildConfig struct {
 	workers         int
-	tempDir         string
 	payloadSize     int
 	fingerprintSize int // in bytes
 	globalSeed      uint64
 	userMetadata    []byte
-	unsortedInput   bool // true to enable unsorted input mode
+	unsortedInput   bool   // true to enable unsorted input mode
+	unsortedTempDir string // temp directory for unsorted partition files
 	algorithm       BlockAlgorithmID
 
-	// Advanced options (spec §7.2)
 	totalKeys uint64 // Pre-known key count for single-pass builds
 }
 
@@ -36,10 +38,13 @@ func WithWorkers(n int) BuildOption {
 	}
 }
 
-// WithTempDir sets the temporary directory for unsorted builds.
-func WithTempDir(dir string) BuildOption {
+// TempDir sets the temporary directory for unsorted partition files.
+// The directory must exist and be on a local filesystem (ext4, xfs, btrfs).
+// NFS is not supported (uses "silly rename" instead of true unlink-while-open).
+// tmpfs works but is not recommended at scale since it stores data in RAM/swap.
+func TempDir(dir string) UnsortedOption {
 	return func(c *buildConfig) {
-		c.tempDir = dir
+		c.unsortedTempDir = dir
 	}
 }
 
@@ -73,22 +78,26 @@ func WithUserMetadata(data []byte) BuildOption {
 }
 
 // WithUnsortedInput enables unsorted input mode.
-// In this mode, keys can be added in any order. The builder uses a temp file
-// to buffer entries by block, then processes them in block order.
+// In this mode, keys can be added in any order. The builder buffers entries
+// in RAM, partitions them, and writes sequentially to partition files.
+// During Finish, partitions are read back and blocks are built.
 //
 // Requirements:
 //   - Keys must be at least 16 bytes long
 //   - Keys must be unique
 //   - NVMe storage recommended (HDD will be very slow)
 //
-// Note: The AddKey phase is always single-threaded (I/O bound to temp file).
+// Note: The AddKey phase is always single-threaded.
 // WithWorkers only affects the build phase in Finish(), where blocks are
-// built in parallel after reading from the temp file.
+// built in parallel after reading from partition files.
 //
-// Use WithTempDir to specify where the temp file is created.
-func WithUnsortedInput() BuildOption {
+// Use TempDir to specify where partition files are created.
+func WithUnsortedInput(opts ...UnsortedOption) BuildOption {
 	return func(c *buildConfig) {
 		c.unsortedInput = true
+		for _, opt := range opts {
+			opt(c)
+		}
 	}
 }
 

@@ -129,9 +129,9 @@ func TestBuildModeEquivalence(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				// Build unsorted
+				// Build unsorted (single-threaded)
 				unsortedPath := filepath.Join(tmpDir, "unsorted.idx")
-				unsortedOpts := append([]BuildOption{WithUnsortedInput(), WithWorkers(1), WithTempDir(tmpDir)}, opts...)
+				unsortedOpts := append([]BuildOption{WithUnsortedInput(TempDir(tmpDir)), WithWorkers(1)}, opts...)
 				builderU, err := NewBuilder(ctx, unsortedPath, uint64(numKeys), unsortedOpts...)
 				if err != nil {
 					t.Fatal(err)
@@ -143,6 +143,23 @@ func TestBuildModeEquivalence(t *testing.T) {
 					}
 				}
 				if err := builderU.Finish(); err != nil {
+					t.Fatal(err)
+				}
+
+				// Build unsorted (parallel)
+				unsortedParPath := filepath.Join(tmpDir, "unsorted_par.idx")
+				unsortedParOpts := append([]BuildOption{WithUnsortedInput(TempDir(tmpDir)), WithWorkers(4)}, opts...)
+				builderUP, err := NewBuilder(ctx, unsortedParPath, uint64(numKeys), unsortedParOpts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i, key := range keys {
+					if err := builderUP.AddKey(key, uint64(i)&payloadMask); err != nil {
+						builderUP.Close()
+						t.Fatal(err)
+					}
+				}
+				if err := builderUP.Finish(); err != nil {
 					t.Fatal(err)
 				}
 
@@ -159,6 +176,10 @@ func TestBuildModeEquivalence(t *testing.T) {
 				if err != nil {
 					t.Fatalf("ReadFile unsorted: %v", err)
 				}
+				unsortedParData, err := os.ReadFile(unsortedParPath)
+				if err != nil {
+					t.Fatalf("ReadFile unsorted_par: %v", err)
+				}
 
 				if algo.algo == AlgoBijection {
 					// Bijection is order-independent, so all modes should produce identical bytes
@@ -167,6 +188,9 @@ func TestBuildModeEquivalence(t *testing.T) {
 					}
 					if !bytes.Equal(sortedData, unsortedData) {
 						t.Error("sorted and unsorted outputs differ for bijection")
+					}
+					if !bytes.Equal(sortedData, unsortedParData) {
+						t.Error("sorted and unsorted_parallel outputs differ for bijection")
 					}
 				} else {
 					// PTRHash may differ due to order-dependent Cuckoo solver.
@@ -178,6 +202,7 @@ func TestBuildModeEquivalence(t *testing.T) {
 						{"sorted", sortedPath},
 						{"parallel", parallelPath},
 						{"unsorted", unsortedPath},
+						{"unsorted_parallel", unsortedParPath},
 					} {
 						idx, err := Open(tc.path)
 						if err != nil {
@@ -593,7 +618,7 @@ func TestUnsortedReplayCloseAfterFailedFinish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	builder, err := NewBuilder(ctx, output, uint64(numKeys),
-		WithUnsortedInput(), WithPayload(4), WithTempDir(tmpDir))
+		WithUnsortedInput(TempDir(tmpDir)), WithPayload(4))
 	if err != nil {
 		t.Fatal(err)
 	}

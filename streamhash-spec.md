@@ -10,20 +10,19 @@
 
 1. [Overview](#1-overview)
 2. [Architecture](#2-architecture)
-3. [Comparison with Alternatives](#3-comparison-with-alternatives)
-4. [Framework / Algorithm Contract](#4-framework--algorithm-contract)
-5. [File Format](#5-file-format)
-6. [Algorithm: Bijection](#6-algorithm-bijection)
-7. [Algorithm: PTRHash Adaptation](#7-algorithm-ptrhash-adaptation)
-8. [Implementation Notes](#8-implementation-notes)
-9. [Appendices](#appendices)
+3. [Framework / Algorithm Contract](#3-framework--algorithm-contract)
+4. [File Format](#4-file-format)
+5. [Algorithm: Bijection](#5-algorithm-bijection)
+6. [Algorithm: PTRHash Adaptation](#6-algorithm-ptrhash-adaptation)
+7. [Implementation Notes](#7-implementation-notes)
+8. [Appendices](#appendices)
 
 **Document Guide:**
 - **Quick understanding:** Read §1 (Overview) and §2 (Architecture) — §1.1 explains what an MPHF is, §1.2 describes the framework, and §2 walks through the end-to-end query flow
-- **Should I use this?:** Read §3 (Comparison) for trade-offs vs alternatives, §1.7 for algorithm selection guidance
-- **Framework extensibility:** Read §1.2 and §4 (Algorithm Contract) for how to plug in new algorithms
+- **Should I use this?:** Read §1.4 (Comparison) for trade-offs vs alternatives, §1.8 for algorithm selection guidance
+- **Framework extensibility:** Read §1.2 and §3 (Algorithm Contract) for how to plug in new algorithms
 - **Implementation:** See §7.0 for a recommended implementation roadmap. The Glossary (Appendix D) defines all technical terms.
-- **Reference:** §5 (File Format), §6 (Bijection), and §7 (PTRHash) are the normative specification
+- **Reference:** §4 (File Format), §5 (Bijection), and §6 (PTRHash) are the normative specification
 
 ---
 
@@ -46,7 +45,7 @@ The framework partitions keys into fixed-size groups, routes each key to its gro
 Two algorithms are integrated today:
 
 - **Bijection** — compact metadata encoding, ~2.46 bits/key, lowest RAM usage
-- **PTRHash** — direct pilot (per-bucket parameter that steers keys to unique slots) lookup, ~2.70 bits/key, fastest queries (~0.05 µs vs ~1.0 µs)
+- **PTRHash** — direct pilot (per-bucket parameter that steers keys to unique slots) lookup, ~2.70 bits/key, fastest queries (~0.07 µs vs ~1.5 µs)
 
 ### 1.3. When to use this
 
@@ -66,10 +65,9 @@ Output: Compact index that answers:
         "what is the rank of key K?" in one disk read (MPHF mode)
         — or —
         "what is the payload for key K?" in two disk reads (payload mode)
-
-Note: Keys must be at least 16 bytes. 32-byte keys (e.g., SHA-256) are recommended.
-      See §6.2.1 for collision probability analysis.
 ```
+
+See §7.2.1 for collision probability analysis of 16-byte vs 32-byte keys.
 
 **When StreamHash is not a good fit:**
 - Fewer than ~100K keys — the block overhead dominates; use a simple hash table or a monolithic MPHF
@@ -89,7 +87,7 @@ The table below compares StreamHash against alternative MPHF constructions. "O(N
 | Cuckoo Filter | ~8-12 | O(N) | 1-2 reads | Yes (probabilistic) | Different purpose |
 | Bloom Filter | ~10 | O(N) | k reads | Yes (probabilistic) | Different purpose |
 
-StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming RecSplit for faster build times. The framework itself is algorithm-agnostic — a streaming RecSplit implementation could be plugged in to achieve similar bits/key with the same bounded-RAM construction (see §3.5).
+StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key compared to RecSplit for faster build times. The framework is algorithm-agnostic — a hypothetical streaming RecSplit solver could be plugged in to achieve similar bits/key with the same bounded-RAM construction (see §3.5). No streaming RecSplit implementation exists today; this is an illustration of the framework's extensibility.
 
 ### 1.5. Design Goals
 
@@ -97,7 +95,7 @@ StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming
 2. **Single-region queries** — Every lookup reads metadata from one contiguous region. MPHF mode requires one disk read; payload mode requires two reads (metadata region + payload region at different file offsets)
 3. **Streaming construction** — Build with minimal userspace RAM:
    - **~1–75 MB** regardless of dataset size (routing buffers + hash array + block queue)
-   - Unsorted input uses a single mmap'd temp file (~1.04–1.13× input size, depending on algorithm)
+   - Unsorted input uses partition flush with bounded memory (~300–460 MB peak, independent of dataset size)
 4. **Build parallelism** — Block independence enables multi-worker construction pipelines. MPHF solving (the CPU-bound step) runs independently per block across workers; a coordinator sequences output. Throughput scales near-linearly with worker count
 5. **Fast construction** — Linear time, I/O-bound at NVMe speeds
 6. **Simplicity** — Straightforward implementation with standard building blocks
@@ -107,10 +105,9 @@ StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming
 - **Input must be uniformly random** — Keys must be pre-hashed if not already random. The implementation does not perform internal pre-hashing; callers must hash non-uniform input before indexing.
 - **Static only** — No insertions or deletions after construction
 - **No membership test by default** — Returns *some* rank for non-member keys unless `FingerprintSize > 0` is configured
-- **Temp disk for construction (unsorted input only)** — When building from unsorted input, temporary disk space approximately equal to input size is required. When building from pre-sorted input, no temp disk is required.
-- **Peak disk usage (unsorted input only)** — During construction from unsorted input, peak disk usage is approximately 3× input size: source data + temp files + final output file.
-- **Write amplification (unsorted input only)** — Construction from unsorted input involves writing keys to a mmap'd temp file (organized by block), then reading back during the build phase. This results in ~1× read + ~1.04–1.13× write of the input data (the margin is 7/√avgKeysPerBlock, which is smaller for PTRHash's larger blocks). Pre-sorted input has minimal I/O.
-- **Maximum key length** — Keys must be ≤ 65,535 bytes. This limit comes from the uint16 key-length field in the unsorted-mode temp file format. In practice, keys are typically 16–64 bytes (hash outputs); this limit exists only as a safety check.
+- **Temp disk for construction (unsorted input only)** — When building from unsorted input, temporary disk space equal to `N × (16 + PayloadSize)` bytes is required (split across multiple partition files). When building from pre-sorted input, no temp disk is required. Temp files are unlinked immediately after creation and automatically cleaned up on process exit. See §7.1.2 for details.
+- **Peak disk usage (unsorted input only)** — During construction from unsorted input, peak disk usage is approximately 2× input size: source data + partition temp files + final output file (temp files are freed as each partition is read back).
+- **Write amplification (unsorted input only)** — Construction from unsorted input involves writing entries to partition files (one write pass), then reading back during the build phase (one read pass). This results in ~1× read + ~1× write of the input data. Pre-sorted input has minimal I/O.
 - **Fixed-size payloads only** — All payloads must be exactly `PayloadSize` bytes. Variable-length values require padding or external storage with offsets.
 
 ### 1.7. Performance Summary
@@ -120,23 +117,26 @@ Reference measurements on Apple M1 Max (100M keys, MPHF mode, pre-sorted input, 
 | Metric              | Bijection               | PTRHash                        |
 |---------------------|-------------------------|--------------------------------|
 | Index size (MPHF)   | ~2.46 bits/key          | ~2.70 bits/key                 |
-| Query latency (CPU) | ~1.0 µs                 | ~0.05 µs                       |
-| Build throughput (1w)| ~16 M keys/sec         | ~16 M keys/sec                 |
-| Build throughput (4w)| ~65 M keys/sec         | ~61 M keys/sec                 |
-| Peak heap RAM (1w)  | ~1 MB                   | ~9 MB                          |
-| Peak heap RAM (4w)  | ~9 MB                   | ~74 MB                         |
+| Query latency (CPU) | ~1.5 µs                 | ~0.07 µs                       |
+| Build throughput (1w)| ~16 M keys/sec         | ~17 M keys/sec                 |
+| Build throughput (4w)| ~65 M keys/sec         | ~62 M keys/sec                 |
+| Peak heap RAM (1w)  | ~1 MB                   | ~8 MB                          |
+| Peak heap RAM (4w)  | ~8 MB                   | ~61 MB                         |
 
 | Metric              | Pre-sorted Input        | Unsorted Input                 |
 |---------------------|-------------------------|--------------------------------|
-| Build throughput (1w)| ~16 M keys/sec         | ~12–13 M keys/sec (~20-25% slower) |
+| Build throughput (1w)| ~16 M keys/sec         | ~16 M keys/sec                 |
+| Build throughput (4w)| ~62 M keys/sec         | ~41 M keys/sec                 |
 | Scale               | 1M – ~10¹² keys         | 1M – ~10¹² keys                |
-| Build I/O           | 1× read                 | 1× read + temp file I/O        |
-| Temp disk           | None                    | ~7σ Poisson margin             |
-| Page cache          | minimal                 | minimal (mmap temp file)       |
+| Build I/O           | 1× read                 | 1× read + 1× write (partition files) |
+| Temp disk           | None                    | N × (16 + PayloadSize) bytes   |
+| Peak RAM            | ~1–75 MB                | ~300–460 MB (bounded, scale-invariant) |
+
+Unsorted builds match sorted throughput at 1 worker. At higher worker counts, unsorted builds scale well but the single-threaded partition reader becomes the bottleneck, reaching ~60% of sorted throughput at 4+ workers. Peak RAM is dominated by read-phase partition buffers (~256 MB budget) plus worker overhead.
 
 Query latency excludes disk I/O. MPHF mode requires one metadata read per query; payload mode requires a second read from the payload region. On NVMe, each read is typically ~100 µs.
 
-*Scale is limited by 40-bit index fields (~1.1 trillion keys max). See §6.2.3 for detailed limits.*
+*Scale is limited by 40-bit index fields (~1.1 trillion keys max). See §7.2.3 for detailed limits.*
 
 ### 1.8. Choosing an Algorithm
 
@@ -144,13 +144,13 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 |---|---|---|
 | **Best for** | Compactness, low RAM | Query speed |
 | Index size | ~2.46 bits/key | ~2.70 bits/key |
-| Query latency (CPU) | ~1.0 µs | ~0.05 µs |
-| Build throughput (4w) | ~65 M keys/sec | ~61 M keys/sec |
-| Peak RAM (4w) | ~9 MB | ~74 MB |
+| Query latency (CPU) | ~1.5 µs | ~0.07 µs |
+| Build throughput (4w) | ~65 M keys/sec | ~62 M keys/sec |
+| Peak RAM (4w) | ~8 MB | ~61 MB |
 
-**Use Bijection** when index size or RAM usage matters most. Bijection achieves better compression (~2.46 vs ~2.70 bits/key) and uses ~8× less RAM during construction (~9 vs ~74 MB at 4 workers). Build throughput is similar between the two algorithms. The trade-off is higher query latency (~1.0 µs vs ~0.05 µs).
+**Use Bijection** when index size or RAM usage matters most. Bijection achieves better compression (~2.46 vs ~2.70 bits/key) and uses ~8× less RAM during construction (~8 vs ~61 MB at 4 workers). Build throughput is similar between the two algorithms. The trade-off is higher query latency (~1.5 µs vs ~0.07 µs).
 
-**Use PTRHash** when query speed is critical. PTRHash achieves O(1) queries by reading a single pilot byte — roughly 20× faster per query than Bijection's checkpoint-based O(128) decode.
+**Use PTRHash** when query speed is critical. PTRHash achieves O(1) queries by reading a single pilot byte — roughly 20× faster per query than Bijection's checkpoint-based decode (up to 128 buckets per query).
 
 ---
 
@@ -208,7 +208,7 @@ function fastRange32(hash: uint64, n: uint32) → uint32:
 
 This is monotonic: sorted prefixes map to non-decreasing block indices. This property enables streaming construction — keys can be processed in prefix-sorted order, completing one block at a time.
 
-**How numBlocks is determined:** The framework asks the algorithm for `numBlocks` at construction time. Each algorithm computes this from its own parameters (lambda — the target average number of keys per bucket (3.0 for Bijection, 3.16 for PTRHash), and bucketsPerBlock — the number of buckets per block; see §6 and §7 for algorithm-specific values):
+**How numBlocks is determined:** The framework asks the algorithm for `numBlocks` at construction time. Each algorithm computes this from its own parameters (lambda — the target average number of keys per bucket (3.0 for Bijection, 3.16 for PTRHash), and bucketsPerBlock — the number of buckets per block; see §5 and §6 for algorithm-specific values):
 
 ```
 totalBuckets = ceil(N / lambda)
@@ -307,23 +307,20 @@ function Query(key) → (globalRank, error):
 ```
     // After computing globalRank, verify fingerprint to detect non-members
     storedFP  = readFingerprint(payloadRegion, globalRank)
-    expectedFP = extractFingerprintHybrid(key, k0, k1)
+    expectedFP = extractFingerprint(k0, k1)
     if storedFP != expectedFP:
         return error(FingerprintMismatch)
 ```
 
-**Fingerprint hybrid extraction:**
+**Fingerprint extraction:**
 ```
-function extractFingerprintHybrid(key, k0, k1) → uint32:
-    if len(key) - 16 >= fingerprintSize:
-        return packBytes(key[len(key) - fingerprintSize:])
-    else:
-        // Unified mixer: depends on both hash halves
-        h = k0 XOR (k1 × 0x517cc1b727220a95)
-        return uint32(h >> 32) & mask(fingerprintSize)
+function extractFingerprint(k0, k1) → uint32:
+    // Unified mixer: depends on both hash halves
+    h = k0 XOR (k1 × 0x517cc1b727220a95)
+    return uint32(h >> 32) & mask(fingerprintSize)
 ```
 
-`packBytes` interprets the given byte slice as a little-endian unsigned integer, zero-extended to uint32. For example, `packBytes([0xAB, 0xCD])` returns `0x0000CDAB`.
+The mixer constant `0x517cc1b727220a95` is odd, making `k1 × C` bijective on uint64. This ensures distinct k1 values produce distinct mixed values. The fingerprint uses different bit positions (high 32 bits of mixed k0/k1) than block routing (which uses big-endian k0 for prefix extraction), providing near-independence.
 
 ### 2.5. Query Locality
 
@@ -341,7 +338,7 @@ Monolithic MPHF algorithms must solve the entire key space as a single unit — 
 
 StreamHash's block model eliminates this dependency. Each block's MPHF is solved independently: the algorithm sees only the keys routed to that block and produces a self-contained metadata blob. This enables a pipeline architecture where multiple workers solve blocks in parallel while a single coordinator writes output in block order.
 
-The pipeline is not embarrassingly parallel — the coordinator serializes file writes — but the serialized output step (writing metadata bytes and folding hashes) is fast relative to MPHF solving (the CPU-bound step). As a result, throughput scales near-linearly with worker count: 4 workers achieve ~3–4× single-threaded throughput (see §1.6).
+The pipeline is not embarrassingly parallel — the coordinator serializes file writes — but the serialized output step (writing metadata bytes and folding hashes) is fast relative to MPHF solving (the CPU-bound step). As a result, throughput scales near-linearly with worker count: 4 workers achieve ~3.5–4× single-threaded throughput (see §1.7).
 
 Queries are also naturally parallel and lock-free: the index is immutable after construction, and each query reads an independent block. No synchronization is needed between concurrent queries.
 
@@ -349,7 +346,7 @@ Queries are also naturally parallel and lock-free: the index is immutable after 
 
 StreamHash is designed as an extensible framework. The MPHF algorithm is pluggable: the framework handles key routing, file layout, parallelism, and payload management, while each algorithm provides a solver (build-time) and a decoder (query-time). Currently two algorithms are implemented:
 
-- **Bijection** (AlgoBijection = 0): EF/GR encoding, O(128) checkpoint-based queries, ~2.46 bits/key
+- **Bijection** (AlgoBijection = 0): EF/GR encoding, checkpoint-based queries (up to 128 buckets decoded per query), ~2.46 bits/key
 - **PTRHash** (AlgoPTRHash = 1): 8-bit pilots with cuckoo hashing, O(1) metadata decode, ~2.70 bits/key
 
 ### 3.1. Build-Time Solver
@@ -370,7 +367,7 @@ At query time, the framework reads a block's metadata from disk and passes it to
 
 1. **Compute the local slot** — given `(k0, k1, metadata, keysInBlock)`, return the slot index in [0, keysInBlock)
 
-Fingerprint extraction is handled at the framework level using a unified mixer (see §2.6), not by the decoder.
+Fingerprint extraction is handled at the framework level using a unified mixer (see §2.4), not by the decoder.
 
 The decoder is **thread-safe** and created once at index open time.
 
@@ -383,6 +380,7 @@ The decoder is **thread-safe** and created once at index open time.
 | Block index management (§4.4) | Framework |
 | File layout (header, regions, footer) | Framework |
 | Payload/fingerprint storage and retrieval | Framework |
+| Fingerprint extraction (unified mixer over k0 and k1; see §2.4) | Framework |
 | Parallel construction coordination | Framework |
 | Unsorted input temp file management | Framework |
 | Streaming integrity hashing (hash-of-hashes) | Framework |
@@ -396,7 +394,6 @@ The decoder is **thread-safe** and created once at index open time.
 | MPHF solving (seed/pilot search) | Algorithm |
 | Metadata encoding and decoding | Algorithm |
 | Slot computation at query time | Algorithm |
-| Fingerprint extraction strategy (for 16-byte keys) | Algorithm |
 | Duplicate key detection during solving | Algorithm |
 
 ### 3.5. Algorithm Requirements
@@ -413,7 +410,7 @@ Any MPHF algorithm can be plugged into the framework, provided it satisfies thes
 
 **Within-block key correlations:** Because the framework routes keys by `prefix = BigEndian.Uint64(key[0:8])`, keys in the same block share similar prefix values, which means byte 0 of the key is approximately fixed within a block. In little-endian, this constrains only the *least* significant byte of k0 — the high bytes remain effectively random. Meanwhile, k1 (bytes 8-15) is completely independent of the routing prefix. In practice, neither current algorithm is affected: Bijection uses `fastRange32(k0, ...)` which is dominated by high bits, and PTRHash uses k1 for bucket assignment. However, algorithm implementors should be aware of this property — if needed, the algorithm can internally re-hash (k0, k1) to produce fully independent values.
 
-**Prefix routing requires uniform input.** Block assignment depends on the key prefix distribution. If keys are highly non-uniform (e.g., all keys share a common prefix), blocks will be severely imbalanced — in the worst case collapsing to a single block. This is why §1.5 requires pre-hashing for non-random input: pre-hashing with a 128-bit hash (see Appendix A) ensures the prefix is uniformly distributed, which in turn ensures balanced block assignment.
+**Prefix routing requires uniform input.** Block assignment depends on the key prefix distribution. If keys are highly non-uniform (e.g., all keys share a common prefix), blocks will be severely imbalanced — in the worst case collapsing to a single block. This is why §1.6 requires pre-hashing for non-random input: pre-hashing with a 128-bit hash (see Appendix A) ensures the prefix is uniformly distributed, which in turn ensures balanced block assignment.
 
 **Framework extensibility:** Other algorithms can be added beyond Bijection and PTRHash. For example, RecSplit could be adapted to achieve close to ~1.56 bits/key with the same bounded-RAM streaming construction — the algorithm only needs a build-time solver and a query-time decoder (see §3.1 and §3.2). (The standalone RecSplit figure is ~1.56 bits/key; framework overhead from the per-block index and fixed costs would add a small amount, likely ~1.6–1.7 bits/key in practice.)
 
@@ -489,7 +486,7 @@ where:
 - `UML` = UserMetadataLen
 - `ACL` = AlgoConfigLen
 - `N` = TotalKeys
-- `entrySize` = PayloadSize + FingerprintSize
+- `entrySize` = PayloadSize + FingerprintSize (fingerprints are derived from k0/k1 at query time, but stored alongside payloads for verification)
 
 ### 4.2. Header (64 bytes)
 
@@ -529,7 +526,7 @@ Algorithm-specific configuration. Currently zero-length for both Bijection and P
 ```
 Offset  Hex bytes                                       Description
 ──────────────────────────────────────────────────────────────────────
-0000    48 4D 54 53 01 00 05 00 00 00 00 00 00 00      Header: Magic "STMH", Version 1
+0000    48 4D 54 53 01 00 05 00 00 00 00 00 00 00      Header: Magic 0x53544D48 ("STMH" as LE uint32 — bytes read as "HMTS"), Version 1
 0010    02 00 00 00 01 00 00 00 00 00 12 34 56 78      NumBlocks=2, RAMBits=1, PayloadSize=0
 0020    9A BC DE F0 00 00 00 00 00 00 00 00 00 00      FingerprintSize=0, Seed=0x..., BlockAlgorithm=0
 0030    00 00 00 00 00 00 00 00 00 00 00 00 00 00      Reserved (zeros)
@@ -649,15 +646,15 @@ The Bijection algorithm combines several well-known MPHF techniques:
 
 - **Per-bucket bijection solving** (brute-force seed search) — a technique used in CHD ([Belazzougui, Botelho & Dietzfelbinger, 2009](https://cmph.sourceforge.net/papers/esa09.pdf)) and RecSplit ([Esposito, Graf & Vigna, 2020](https://epubs.siam.org/doi/pdf/10.1137/1.9781611976007.14))
 - **Elias-Fano encoding** for cumulative bucket sizes and **Golomb-Rice coding** for seeds — standard succinct/compressed encoding techniques, applied to MPHF seed storage by RecSplit
-- **Hierarchical splitting** for large buckets (see §6.4) — inspired by RecSplit's recursive splitting
+- **Binary splitting** for large buckets (size ≥ 8; see §5.4) — inspired by RecSplit's recursive splitting, but limited to a single level
 
-Where Bijection diverges from RecSplit: it replaces RecSplit's tree-based recursive structure with a flat per-bucket layout plus 128-bucket checkpoints for O(128) query decode. A key design goal of Bijection was **faster build times** — the flat structure with small buckets (lambda=3) enables rapid seed search without RecSplit's expensive recursive splitting, trading space efficiency (~2.46 vs ~1.6–1.7 bits/key for a streaming RecSplit) for significantly faster construction.
+Where Bijection diverges from RecSplit: it replaces RecSplit's tree-based recursive structure with a flat per-bucket layout plus 128-bucket checkpoints (queries decode at most 128 buckets per lookup). A key design goal of Bijection was **faster build times** — the flat structure with small buckets (lambda=3) enables rapid seed search without RecSplit's expensive recursive splitting, trading space efficiency (~2.46 vs ~1.6–1.7 bits/key for a streaming RecSplit) for significantly faster construction.
 
 **Parameters:**
 - `lambda = 3.0` (average keys per bucket)
 - `bucketsPerBlock = 1024` — chosen to balance metadata size, query decode cost, and block count. At lambda=3, each block holds ~3,072 keys. With 128-bucket checkpoints, query decode scans at most 128 buckets. Increasing `bucketsPerBlock` reduces the number of blocks (and RAM index size) but increases per-block metadata and decode cost. 1024 keeps metadata per block to ~1 KB typical, fitting within a single 4 KB page.
 - `splitThreshold = 8` (buckets ≥ 8 keys use splitting)
-- `checkpointInterval = 128` — byte offsets are stored every 128 buckets to enable O(128) decode (see §5.7)
+- `checkpointInterval = 128` — byte offsets are stored every 128 buckets so queries decode at most 128 buckets (see §5.7)
 
 ### 5.2. Bucket Assignment
 
@@ -798,7 +795,7 @@ Offset  Size          Content
 end-FL  variable      Fallback list (see below)
 ```
 
-**Checkpoints** store byte offsets at 128-bucket intervals (buckets 128, 256, 384, ..., 896), enabling O(128) decode instead of O(1024). Each checkpoint records two uint16 offsets: the starting position in the Elias-Fano stream and the starting position in the Golomb-Rice seed stream. This allows queries to skip directly to the relevant segment without decoding from the beginning. Bucket 0 is implicit (offset 0), so 7 checkpoints cover all 1024 buckets.
+**Checkpoints** store byte offsets at 128-bucket intervals (buckets 128, 256, 384, ..., 896), so queries decode at most 128 buckets instead of all 1024. Each checkpoint records two uint16 offsets: the starting position in the Elias-Fano stream and the starting position in the Golomb-Rice seed stream. This allows queries to skip directly to the relevant segment without decoding from the beginning. Bucket 0 is implicit (offset 0), so 7 checkpoints cover all 1024 buckets.
 
 **Fallback list encoding:**
 
@@ -860,8 +857,8 @@ function QuerySlotBijection(k0, k1, metadata, keysInBlock) → localSlot:
 
 ### 5.9. Fingerprint Extraction
 
-Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.6 for the
-unified hybrid extraction strategy using a mixer over both k0 and k1.
+Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.4 for the
+unified extraction strategy using a mixer over k0 and k1.
 
 ---
 
@@ -1018,8 +1015,8 @@ function QuerySlotPTRHash(k0, k1, metadata, keysInBlock) → localSlot:
 
 ### 6.8. Fingerprint Extraction (PTRHash)
 
-Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.6 for the
-unified hybrid extraction strategy using a mixer over both k0 and k1.
+Fingerprint extraction is handled at the framework level, not per-algorithm. See §2.4 for the
+unified extraction strategy using a mixer over k0 and k1.
 
 ### PTRHash Divergence Summary (§6.9–§6.13)
 
@@ -1098,75 +1095,97 @@ The tradeoff: small blocks have higher per-block failure probability, requiring 
 
 For implementers, this is the recommended order for building a StreamHash library:
 
-1. **Mental model:** Read §2 (Architecture) and §4 (Contract)
+1. **Mental model:** Read §2 (Architecture) and §3 (Contract)
 2. **Query path first:** Implement §4.4 (RAM Index), §5.5 (Elias-Fano decoding), §5.8 (Query)
-3. **Single-threaded build:** Implement §7.1.1 (Sorted Mode), §4.4 (Bijection solving), §5.3 (Mix function)
+3. **Single-threaded build:** Implement §7.1.1 (Sorted Mode), §5.4 (Bijection solving), §5.3 (Mix function)
 4. **Seed encoding:** Add §5.6 (Golomb-Rice encoding/decoding)
-5. **Split buckets:** Add deterministic splitting — buckets with ≥8 keys use splitPoint = size/2
-6. **Unsorted input:** Add §7.1.2 (Unsorted Input Mode with temp file routing)
+5. **Split buckets:** Add binary splitting — buckets with ≥8 keys split once with splitPoint = size/2
+6. **Unsorted input:** Add §7.1.2 (Unsorted Input Mode with partition flush)
 7. **Parallelism:** Add multi-threaded builds with worker pools and ordered block delivery
 
 Starting with the query path lets you verify correctness incrementally: build a small index, then test queries before adding complexity.
 
 ### 7.1. Construction
 
-#### 8.1.1. Sorted Mode (Default)
+#### 7.1.1. Sorted Mode (Default)
 
 Keys arrive in non-decreasing prefix order. The framework routes each key to its block, accumulates keys for the current block, and when the block boundary changes, invokes the algorithm's solver, writes the metadata, and resets for the next block. This enables true streaming construction with ~1 MB RAM (single-threaded, Bijection).
 
-#### 8.1.2. Unsorted Mode
+#### 7.1.2. Unsorted Mode
 
-For unsorted input, the framework uses a **two-pass construction** process with temporary file-based routing.
+For unsorted input, the framework uses a **partition flush** architecture with bounded memory.
 
-**Overflow margin:** To handle uneven key distribution, each block region is allocated with a dynamic 7σ Poisson margin:
-```
-avgKeysPerBlock = N / numBlocks
-σ = sqrt(avgKeysPerBlock)
-regionCapacity = ceil(avgKeysPerBlock × (1 + 7 / sqrt(avgKeysPerBlock)))
-```
-This provides ~10⁻¹² overflow probability per block (Gaussian tail Q(7) ≈ 1.28×10⁻¹²). The margin adapts to block size: small blocks (1K keys) get ~+22%, large blocks (1M keys) get ~+0.7%.
+**Architecture overview:**
 
-**Pass 1: Routing to temp file**
-- Each key is routed to its block using `blockIdx = fastRange32(prefix, numBlocks)`
-- Keys are written to block-specific regions in a memory-mapped temp file
-- The temp file contains `numBlocks` contiguous regions, each sized for `regionCapacity` entries
+The build proceeds in two phases with an explicit memory transition between them:
 
-**Temp file layout:**
-```
-[Region 0: regionCapacity entries]
-[Region 1: regionCapacity entries]
-...
-[Region numBlocks-1: regionCapacity entries]
-```
+1. **Write phase** — Keys are buffered in memory, partitioned by block range, and flushed to partition files on disk via double-buffered I/O
+2. **Read phase** — Partition files are read back one at a time, entries are sorted by block using a two-pass grouping algorithm (described below), and blocks are built sequentially
 
-**Entry format:**
+Peak memory is `max(write phase, read phase)`, not the sum, because write-phase buffers are freed before read-phase buffers are allocated.
+
+**Terminology:** This section introduces two terms specific to unsorted mode:
+- **Partition file** — a temp file on disk containing entries for a contiguous range of blocks. The number of partition files (denoted `numParts`) is derived from the memory budget to keep read-phase memory bounded.
+- **Block group** — a contiguous group of S=500 blocks within a partition, used as an intermediate grouping unit during the read phase. Block groups are a StreamHash-specific concept, not a standard term. Their purpose is explained in the read phase section below.
+
+**Partition count derivation:**
+
+The block range is divided among `numParts` partition files, each covering `blocksPerPart = ceil(numBlocks / numParts)` consecutive blocks. `numParts` is derived from the memory budget to ensure read-phase memory stays within budget:
+
 ```
-[keyLen: uint16_le][key: keyLen bytes][payload: PayloadSize bytes]
+onDiskEntrySize = 16 + PayloadSize     // k0(8) + k1(8) + payload
+readCostPerEntry = 58                   // see "Read-phase memory" below for derivation
+partFileTarget = memoryBudget × onDiskEntrySize / readCostPerEntry
+numParts = clamp(ceil(totalDataSize / partFileTarget), 1, maxPartitions)
 ```
 
-The `uint16_le` key-length field limits keys to ≤ 65,535 bytes (see §1.5). In practice, keys are typically 16–64 bytes (hash outputs); this limit exists only as a safety check.
+With the default 256 MB budget and no payload: `partFileTarget = 256 × 16 / 58 ≈ 70.6 MB`. `numParts` is also capped at `min(5000, RLIMIT_NOFILE - 100)` to avoid exhausting file descriptors.
 
-**Per-block write cursors:**
-- An array of `numBlocks` counters tracks the write position within each block's region
-- This small RAM cost (e.g., ~126 KB for 31.6M blocks at 1T keys) enables concurrent writes without coordination
+**Fast path:** If all keys fit in the flush buffer without triggering a flush (fewer than ~125K keys at the default budget), the builder sorts the buffer in-memory and builds blocks directly — no partition files are created.
 
-**Pass 2: Read-back and solving**
-- Blocks are read back sequentially in order (block 0, block 1, ...)
-- For each block, the framework reads entries from `[region_start, region_start + cursor_value)` where cursor_value is the final write position for that block
-- The solver receives all keys for the block and produces metadata
-- This ensures the normative requirement: the solver receives all keys for block N before block N+1
+**Write phase — double-buffered partition flush:**
 
-**Overflow handling:**
-- If a block's region fills up (cursor reaches `regionCapacity`), the builder returns `ErrRegionOverflow`
-- The 7σ Poisson margin (described above) makes this extremely unlikely (~10⁻¹² per block)
+Each key is routed to partition `p = blockID / blocksPerPart` and written to a flat in-memory buffer. When the buffer fills, the active buffer is swapped with the inactive buffer, and a background goroutine encodes and writes the inactive buffer to the partition files. This hides flush latency behind continued key ingestion.
 
-The temp file is deleted after construction.
+- **Buffer layout:** Two flat arrays of `{k0, k1, payload}` entries, divided into `numParts` regions with 12.5% headroom for hash variance. Each entry is 24 bytes in memory (k0: 8 bytes + k1: 8 bytes + payload: 8 bytes, with the payload field always occupying 8 bytes regardless of `PayloadSize` for alignment). Each flat buffer is ~4 MB, optimized for L3 cache locality during writes; double-buffering fully hides flush I/O.
+- **On-disk entry format:** `[k0: 8 bytes LE][k1: 8 bytes LE][payload: PayloadSize bytes LE]` — compact on disk (16 + PayloadSize bytes). Fingerprints and block IDs are not stored because both are derivable: fingerprints from k0/k1 via the mixer (§2.4), and blockID by recomputing `fastRange32(BigEndian.Uint64(ReverseBytes(k0)), numBlocks)`.
+- **Crash safety:** All partition files are opened at build start and immediately unlinked (`os.Remove`). Writes and reads use the persistent file descriptors. The kernel frees the data when the last fd is closed (POSIX guarantee). On process exit — including crashes — all temp data is automatically freed.
+- **TempDir requirement:** Must be on a local filesystem (ext4, xfs, btrfs). NFS is not supported (uses "silly rename" instead of true unlink-while-open). tmpfs works but is not recommended at scale since it stores data in RAM.
 
-#### 8.1.3. Parallel Mode
+**Read phase — two-pass block grouping:**
 
-Both sorted and unsorted modes support parallel block building with configurable worker counts. Workers solve blocks independently; a coordinator thread sequences output in block order. See §2.8 for the architectural rationale. See §1.6 for performance measurements.
+Each partition file contains entries for many blocks (e.g., ~4,500 blocks for Bijection at 100M keys). The read phase must group these entries by block so they can be fed to the MPHF solver block by block.
 
-#### 8.1.4. Thread Safety
+Scattering directly to per-block bins would require thousands of separate memory regions, each needing its own overflow margin for hash variance. This wastes significant memory on margins. Instead, the read phase uses a two-pass approach with an intermediate grouping unit called a **block group** (a contiguous run of S=500 blocks):
+
+1. **Coarse scatter (by block group):** Divide the partition's blocks into block groups of S=500 blocks each. Allocate one contiguous memory region per block group, sized for the expected number of entries plus a safety margin (described below). In a single pass over the partition file, decode each entry, recompute its blockID from k0 (via `fastRange32(BigEndian(ReverseBytes(k0)), numBlocks)`), determine which block group it belongs to (`blockID / S`), and append it to that block group's region.
+
+2. **Fine sort (within each block group):** For each block group, sort entries by blockID using an in-place counting sort: copy entries to a scratch buffer, count entries per blockID, compute prefix-sum offsets, and scatter back into the block group's region in block order. The scratch buffer is reused across block groups and partitions.
+
+After both passes, entries within each block group's region are sorted by block, and the solver processes them block by block in order.
+
+**Block group sizing and overflow margin:** Since keys are uniformly distributed across blocks, the number of entries in each block group follows a Binomial distribution (n total entries, each independently assigned to one of numBlocks blocks, and a block group covers S of those blocks). For large n this is well-approximated by a Poisson distribution. Each block group region is allocated with a **6σ margin**: `expected + 6 × sqrt(expected)` entries. This provides P(overflow) < 10⁻⁸ per block group. With ~200 block groups per build (typical for 100M keys), the union bound gives P(any overflow) < 5×10⁻⁵ per build. If a block group overflows despite this margin, the build fails with an error.
+
+**Read-phase memory:** The `readCostPerEntry = 58` in the partition count formula accounts for the two copies of entries needed during the counting sort step: 2 × (24-byte in-memory entry + 4-byte blockID) × 1.03 block group margin = 58 bytes. The factor of 2 is because the counting sort copies entries to a scratch buffer and back — both the primary region and the scratch buffer must be in memory simultaneously.
+
+**Pipelined partition processing:** While blocks from partition `i` are being built, partition `i+1` is read and grouped in a background goroutine. Two sets of pipeline buffers (entry arrays + blockID arrays) alternate between the read and build steps, hiding I/O latency behind compute.
+
+**Resource usage by scale:**
+
+| Total keys | Partitions | Temp disk (PayloadSize=0) | Temp disk (PayloadSize=4) | Write RAM | Read RAM |
+|------------|------------|---------------------------|---------------------------|-----------|----------|
+| 1M | 1 | 0 (fast path) | 0 (fast path) | ~10 MB | — |
+| 10M | 3 | 160 MB | 200 MB | ~10 MB | ~260 MB |
+| 50M | 12 | 800 MB | 1 GB | ~10 MB | ~260 MB |
+| 1B | 227 | 16 GB | 20 GB | ~10 MB | ~260 MB |
+
+Write RAM (~10 MB peak): two ~4 MB flat buffers + small encode buffer. Read RAM (~260 MB peak): two pipeline entry arrays + two blockID arrays + scratch buffer. Both are bounded and independent of dataset size.
+
+#### 7.1.3. Parallel Mode
+
+Both sorted and unsorted modes support parallel block building with configurable worker counts. Workers solve blocks independently; a coordinator thread sequences output in block order. See §2.6 for the architectural rationale. See §1.7 for performance measurements.
+
+#### 7.1.4. Thread Safety
 
 **Queries:** Thread-safe and lock-free. The RAM index is immutable after load, and block reads are independent.
 
@@ -1174,7 +1193,7 @@ Both sorted and unsorted modes support parallel block building with configurable
 
 ### 7.2. Operational Concerns
 
-#### 8.2.1. Key Length and Collision Analysis
+#### 7.2.1. Key Length and Collision Analysis
 
 Keys must be at least 16 bytes. StreamHash uses the first 16 bytes as k0 and k1.
 
@@ -1206,7 +1225,7 @@ Keys must be at least 16 bytes. StreamHash uses the first 16 bytes as k0 and k1.
 
 For structured (non-random) input, keys **must** be pre-hashed with a 128-bit hash (see Appendix A). See §2.1 for the definitions of k0, k1, and prefix.
 
-#### 8.2.2. Payload Modes
+#### 7.2.2. Payload Modes
 
 | PayloadSize | FingerprintSize | Mode | Query Returns |
 |-------------|-----------------|------|---------------|
@@ -1215,7 +1234,7 @@ For structured (non-random) input, keys **must** be pre-hashed with a 128-bit ha
 | >0 | 0 | Payload only | Payload (no verification) |
 | >0 | >0 | Payload + verification | Payload or ErrNotFound |
 
-#### 8.2.3. Dataset Size Limits
+#### 7.2.3. Dataset Size Limits
 
 StreamHash is optimized for large datasets (N > 100,000 keys). Block counts depend on the algorithm — Bijection uses smaller blocks (~3,072 keys) than PTRHash (~31,600 keys), so Bijection produces more blocks for the same N. For smaller datasets, framework fixed costs (header, footer, RAM index) become significant relative to useful MPHF data:
 
@@ -1228,7 +1247,7 @@ StreamHash is optimized for large datasets (N > 100,000 keys). Block counts depe
 
 **Maximum dataset size:** ~2^40 keys due to 40-bit RAM index fields. At this scale, the RAM index is ~3.6 GB (Bijection, ~358M blocks) or ~348 MB (PTRHash, ~34.8M blocks).
 
-#### 8.2.4. RAM Index Safety
+#### 7.2.4. RAM Index Safety
 
 **Bounds checking:** Before reading block metadata, implementations SHOULD verify that `MetadataOffset` points within the metadata region:
 
@@ -1247,11 +1266,11 @@ if xxHash64(headerAndIndexBytes) != expectedChecksum:
     return ErrCorruptHeader
 ```
 
-The expected checksum can be stored in `UserMetadata` or a separate manifest file.
+The expected checksum must be stored externally (e.g., a separate manifest file or database). It cannot be stored in `UserMetadata` because UserMetadata is part of the data being checksummed.
 
 **Large file support:** The 40-bit MetadataOffset field supports metadata regions up to ~1.1 TB.
 
-#### 8.2.5. Error Handling
+#### 7.2.5. Error Handling
 
 Error names below are from the reference implementation; other implementations may use different naming.
 
@@ -1269,7 +1288,6 @@ Error names below are from the reference implementation; other implementations m
 | ErrTooManyKeys | Key count exceeds 2^40 | Reject |
 | ErrUnsortedInput | Input keys not sorted (sorted mode) | Reject |
 | ErrPayloadOverflow | Payload value exceeds PayloadSize capacity | Reject |
-| ErrRegionOverflow | Block metadata/payload region capacity exceeded | Reject |
 | ErrSplitBucketSeedSearchFailed | Bijection split-bucket seed search exhausted | Retry with different globalSeed |
 | ErrIndistinguishableHashes | Indistinguishable hash pairs in a bucket | Retry with different globalSeed |
 
@@ -1280,17 +1298,17 @@ Error names below are from the reference implementation; other implementations m
 | ErrInvalidMagic | Magic ≠ 0x53544D48 | Reject file |
 | ErrInvalidVersion | Version ≠ 0x0001 | Reject file |
 | ErrChecksumFailed | Footer hash mismatch | Reject file |
-| ErrFingerprintMismatch | Fingerprint doesn't match (non-member query) | Return "not found" |
+| ErrNotFound | Key not found (empty block or fingerprint mismatch) | Return "not found" |
 | ErrCorruptedIndex | Invalid metadata or out-of-bounds | Reject |
 | ErrTruncatedFile | File shorter than expected | Reject |
 
-#### 8.2.6. Security Considerations
+#### 7.2.6. Security Considerations
 
 StreamHash assumes uniformly random input. Non-random input causes failure modes:
 
 **Non-uniform key distribution:**
 - Keys clustering in blocks cause temp file overflow (unsorted mode)
-- The 7σ Poisson margin (§7.1.2) is calibrated for uniform random keys
+- The 6σ Poisson margin (§7.1.2) is calibrated for uniform random keys
 
 **Correlated keys (e.g., sequential IDs):**
 - Pre-hashing with xxHash3-128 is REQUIRED for non-random keys
@@ -1332,7 +1350,7 @@ Collisions cause build failure (duplicate key error), not silent corruption.
 
 ### B. Load Factor Selection
 
-**Bijection:** The default lambda = 3.0 with hierarchical bucket splitting (threshold 8) balances build speed and storage:
+**Bijection:** The default lambda = 3.0 with binary bucket splitting (threshold 8) balances build speed and storage:
 
 | lambda | Bits/Key | Fallback Rate | Split Rate | Notes |
 |--------|----------|---------------|------------|-------|
@@ -1389,7 +1407,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | Term | Definition |
 |------|------------|
 | MPHF | Minimal Perfect Hash Function — bijection from N keys to [0, N) |
-| Bijection | One-to-one mapping with no collisions |
+| Bijection | (1) A one-to-one mapping with no collisions. (2) The name of StreamHash's default MPHF algorithm (§5), which finds bijective seed-to-slot mappings per bucket. |
 | prefix | First 8 bytes of a key, interpreted as **big-endian** uint64, used for block routing (see §2.1) |
 | k0 | First 8 bytes of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.1) |
 | k1 | Bytes 8-15 of a key, interpreted as **little-endian** uint64, used for algorithm operations (see §2.1) |
@@ -1404,8 +1422,7 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | Golomb-Rice | Variable-length encoding optimal for geometrically distributed values |
 | Sentinel | Special value indicating "look in fallback list" |
 | Fallback List | Explicit storage for seeds that exceed normal encoding range |
-| Hierarchical Splitting | Buckets with ≥8 keys split into two sub-buckets using hash-based classification |
-| Deterministic Splitting | splitPoint = bucketSize / 2; sub-bucket sizes are exactly splitPoint and bucketSize - splitPoint |
+| Binary Splitting | Buckets with ≥8 keys split once into two sub-buckets (splitPoint = bucketSize / 2), each solved independently. Not recursive — only one level of splitting. |
 | Payload | Fixed-size data (1-8 bytes) associated with a key |
 | Fingerprint | Bytes stored per entry to detect non-member queries (1-4 bytes) |
 | UserMetadata | Variable-length application-defined data stored after header |
@@ -1415,10 +1432,12 @@ Total bits/key = routing_overhead + 8 × (PayloadSize + FingerprintSize)
 | alpha | PTRHash slot overflow factor (0.99); numSlots = ceil(N/alpha) |
 | Effectively independent pilots | Measure of pilot value independence in PTRHash; the number of pilots (out of 256) that produce truly independent hash patterns. Higher values reduce build failure probability. See §6.11. |
 | CubicEps | Skewed bucket distribution: x²(1+x)/2 × 255/256 + x/256 |
-| Checkpoints | Bijection: 28-byte metadata (7 × uint16 pairs) storing byte offsets into Elias-Fano and Golomb-Rice streams at 128-bucket intervals. Enables O(128) decode by allowing queries to skip to the relevant segment instead of decoding from the beginning. See §5.7. |
+| Checkpoints | Bijection: 28-byte metadata (7 × uint16 pairs) storing byte offsets into Elias-Fano and Golomb-Rice streams at 128-bucket intervals. Queries skip to the relevant checkpoint and decode at most 128 buckets instead of all 1024. See §5.7. |
 | Separated Layout | File layout where payloads are in a contiguous region separate from block metadata |
 | Streaming Construction | Building the index with bounded RAM regardless of dataset size |
 | Remap Table | PTRHash overflow table mapping slots ≥ numKeys to holes in [0, numKeys) |
-| wymix | WyHash v4 mixing primitive: 128-bit multiply with XOR fold (hi ^ lo). See §6.3. |
+| wymix | WyHash v4 mixing primitive: 128-bit multiply with XOR fold (hi ^ lo). See §5.3. |
 | SplitMix64 | PRNG finalizer (Vigna, 2015) providing strong avalanche properties. See §6.3. |
 | Cuckoo Hashing | Hash table technique where items can be displaced to alternative positions to resolve collisions |
+| Partition file | Temp file on disk containing entries for a contiguous range of blocks, used during unsorted-mode construction. See §7.1.2. |
+| Block group | A contiguous group of S=500 blocks within a partition, used as an intermediate grouping unit during unsorted-mode read-back. Entries are first scattered into per-block-group regions (coarse sort), then counting-sorted within each block group (fine sort). StreamHash-specific term. See §7.1.2. |

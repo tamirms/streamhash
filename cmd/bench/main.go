@@ -205,8 +205,7 @@ func main() {
 	opts = append(opts, streamhash.WithAlgorithm(algo))
 
 	if !sortedMode {
-		opts = append(opts, streamhash.WithUnsortedInput())
-		opts = append(opts, streamhash.WithTempDir(tmpDir))
+		opts = append(opts, streamhash.WithUnsortedInput(streamhash.TempDir(tmpDir)))
 	}
 
 	builder, err := streamhash.NewBuilder(context.Background(), indexPath, uint64(numKeys), opts...)

@@ -21,17 +21,22 @@ Reference measurements on Apple M1 Max, 100M keys, MPHF mode, pre-sorted input:
 | Metric | Bijection | PTRHash |
 |---|---|---|
 | Index size (MPHF) | ~2.46 bits/key | ~2.70 bits/key |
-| Query latency (CPU) | ~1.0 µs | ~0.05 µs |
-| Build throughput (1 worker) | ~16 M keys/sec | ~16 M keys/sec |
-| Build throughput (4 workers) | ~65 M keys/sec | ~61 M keys/sec |
-| Peak heap RAM (1 worker) | ~1 MB | ~9 MB |
-| Peak heap RAM (4 workers) | ~9 MB | ~74 MB |
+| Query latency (CPU) | ~1.5 µs | ~0.07 µs |
+| Build throughput (1 worker) | ~16 M keys/sec | ~17 M keys/sec |
+| Build throughput (4 workers) | ~65 M keys/sec | ~62 M keys/sec |
+| Peak heap RAM (1 worker) | ~1 MB | ~8 MB |
+| Peak heap RAM (4 workers) | ~8 MB | ~61 MB |
 
-Unsorted input builds are ~20-25% slower (single-threaded) due to temp file I/O:
+Unsorted input (100M keys, MPHF mode):
 
 | Metric | Bijection | PTRHash |
 |---|---|---|
-| Build throughput (1 worker, unsorted) | ~12 M keys/sec | ~13 M keys/sec |
+| Build throughput (1 worker, unsorted) | ~16 M keys/sec | ~15 M keys/sec |
+| Build throughput (4 workers, unsorted) | ~39 M keys/sec | ~41 M keys/sec |
+| Peak heap RAM (1 worker, unsorted) | ~316 MB | ~407 MB |
+| Peak heap RAM (4 workers, unsorted) | ~318 MB | ~431 MB |
+
+Unsorted builds match sorted throughput at 1 worker. At higher worker counts, unsorted builds scale well but reach ~60% of sorted throughput due to the single-threaded partition reader feeding workers. Peak RAM is higher than sorted mode because of read-phase partition buffers (~256 MB budget).
 
 Query latency is the same regardless of input mode. Query latency excludes disk I/O. Each query requires one metadata read (~100 µs on NVMe); payload mode adds a second read.
 
@@ -144,7 +149,7 @@ rank, err := idx.Query(streamhash.PreHash(originalKey))
 
 **Bijection** (default) — best for most use cases. Smallest indexes (~2.46 bits/key) and lowest RAM usage. Query decoding is O(128) via checkpoint-based Elias-Fano/Golomb-Rice decoding.
 
-**PTRHash** — best when query speed is critical. O(1) queries via direct pilot byte lookup (~0.05 µs vs ~1.0 µs), at the cost of slightly larger indexes (~2.70 bits/key) and more RAM during construction.
+**PTRHash** — best when query speed is critical. O(1) queries via direct pilot byte lookup (~0.07 µs vs ~1.5 µs), at the cost of slightly larger indexes (~2.70 bits/key) and more RAM during construction.
 
 ## Design
 
