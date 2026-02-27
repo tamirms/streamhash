@@ -849,7 +849,9 @@ func (b *Builder) finishUnsortedSingleThreaded() error {
 
 // finishUnsortedParallel reads partitions and dispatches blocks to workers.
 // Uses pipelined partition processing: reads partition P+1 in background
-// while dispatching blocks from partition P.
+// while dispatching blocks from partition P. Entries are copied from the
+// flatBuf into pool-allocated slices, eliminating the need for fence
+// synchronization between workers and the reader.
 func (b *Builder) finishUnsortedParallel() error {
 	b.initParallelWorkers()
 
@@ -863,11 +865,6 @@ func (b *Builder) finishUnsortedParallel() error {
 
 	var nextResult *readResult
 
-	// Per-pipeline-buffer fences: workers signal Done() after reading entries,
-	// allowing the flatBuf to be safely reused for the next partition read.
-	// This eliminates the need to copy entries from flatBuf to pool slices.
-	var bufFence [2]sync.WaitGroup
-
 	// Start reading partition 0
 	if numParts > 0 {
 		entries, err := u.readPartition(0, 0, u.readFlatBufs[0], u.readBlockIDs[0])
@@ -880,10 +877,10 @@ func (b *Builder) finishUnsortedParallel() error {
 			return errors.Join(currentResult.err, u.cleanup(), b.cleanup())
 		}
 
-		pIdx := p % 2
-
 		// Start reading next partition in background.
-		// Fence: wait for workers to finish reading from the flatBuf before reusing it.
+		// No fence needed: entries are copied to pool slices during dispatch,
+		// so the flatBuf is safe to reuse as soon as the dispatch loop finishes
+		// (which completes before the reader needs the same-parity buffer again).
 		var wg sync.WaitGroup
 		if p+1 < numParts {
 			nextResult = &readResult{}
@@ -891,35 +888,15 @@ func (b *Builder) finishUnsortedParallel() error {
 			result := nextResult
 			nextPart := p + 1
 			nextPIdx := nextPart % 2
-			fence := &bufFence[nextPIdx]
 			go func() {
 				defer wg.Done()
-				// Wait for workers using this flatBuf to finish reading entries.
-				// For the first use of each buffer, the fence count is 0 (instant).
-				fence.Wait()
 				result.entries, result.err = u.readPartition(nextPart, nextPIdx, u.readFlatBufs[nextPIdx], u.readBlockIDs[nextPIdx])
 			}()
 		}
 
-		// Batch fence: count non-empty blocks and add the total to the
-		// WaitGroup once, instead of per-block Add(1). This eliminates
-		// atomic contention between the dispatch goroutine and workers
-		// that caused 22% CPU in pthread_cond_signal at high worker counts.
-		nonEmptyBlocks := 0
-		for _, entries := range currentResult.entries {
-			if len(entries) > 0 {
-				nonEmptyBlocks++
-			}
-		}
-		if nonEmptyBlocks > 0 {
-			bufFence[pIdx].Add(nonEmptyBlocks)
-		}
-
-		// Dispatch blocks from current partition directly from flatBuf.
-		// Workers signal bufFence[pIdx].Done() after reading entries,
-		// allowing flatBuf[pIdx] to be reused when the next same-parity
-		// partition reads.
-		dispatched := 0
+		// Copy entries from flatBuf into pool-allocated slices and dispatch.
+		// This matches sorted mode's pattern: pooled=true, workers return
+		// slices to entryPool after processing. No fence synchronization needed.
 		var loopErr error
 		partStartBlock := uint32(p * u.blocksPerPart)
 		for localIdx, entries := range currentResult.entries {
@@ -952,12 +929,14 @@ func (b *Builder) finishUnsortedParallel() error {
 				continue
 			}
 
-			// Dispatch entries directly from flatBuf (zero-copy).
-			// Worker signals bufFence[pIdx].Done() after reading entries.
+			// Copy entries from flatBuf into a pool slice.
+			poolSlice := b.getEntrySlice()
+			poolSlice = append(poolSlice, entries...)
+
 			work := blockWork{
 				blockID:    blockID,
-				entries:    entries,
-				fenceWg:    &bufFence[pIdx],
+				entries:    poolSlice,
+				pooled:     true,
 				keysBefore: b.keysBefore,
 			}
 			b.keysBefore += uint64(len(entries))
@@ -965,7 +944,6 @@ func (b *Builder) finishUnsortedParallel() error {
 
 			select {
 			case b.workChan <- work:
-				dispatched++
 			case <-b.workerCtx.Done():
 				loopErr = b.workerCtx.Err()
 			case err := <-b.writerDone:
@@ -977,12 +955,6 @@ func (b *Builder) finishUnsortedParallel() error {
 			}
 		}
 
-		// Release fence for blocks that were never dispatched.
-		// Uses Add(-N) which is equivalent to N calls to Done().
-		if remaining := nonEmptyBlocks - dispatched; remaining > 0 {
-			bufFence[pIdx].Add(-remaining)
-		}
-
 		if loopErr != nil {
 			wg.Wait()
 			return errors.Join(loopErr, u.cleanup(), b.cleanup())
@@ -990,10 +962,6 @@ func (b *Builder) finishUnsortedParallel() error {
 
 		wg.Wait()
 	}
-
-	// Wait for all remaining workers to finish with flatBuf data before cleanup.
-	bufFence[0].Wait()
-	bufFence[1].Wait()
 
 	if err := u.cleanup(); err != nil {
 		return errors.Join(err, b.cleanup())

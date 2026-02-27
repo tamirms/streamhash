@@ -50,7 +50,15 @@ type blockResult struct {
 // initParallelWorkers initializes channels, pools, and starts worker/writer goroutines
 // for parallel building. Used by both sorted parallel mode and unsorted parallel mode.
 func (b *Builder) initParallelWorkers() {
-	b.workChan = make(chan blockWork, b.workers*workChanBufferMultiplier)
+	// Unsorted mode uses a larger work channel buffer so the reader goroutine
+	// can queue blocks ahead of workers, reducing worker starvation between
+	// partition reads. Sorted mode dispatches inline during AddKey and doesn't
+	// need the extra buffering.
+	bufMul := workChanBufferMultiplier
+	if b.unsortedBuf != nil {
+		bufMul = 16
+	}
+	b.workChan = make(chan blockWork, b.workers*bufMul)
 	b.resultChan = make(chan blockResult, b.workers*workChanBufferMultiplier)
 	b.writerDone = make(chan error, 1)
 
