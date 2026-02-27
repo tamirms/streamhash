@@ -97,7 +97,7 @@ StreamHash's Bijection algorithm trades ~0.8–0.9 extra bits/key vs a streaming
 2. **Single-region queries** — Every lookup reads metadata from one contiguous region. MPHF mode requires one disk read; payload mode requires two reads (metadata region + payload region at different file offsets)
 3. **Streaming construction** — Build with minimal userspace RAM:
    - **~1–75 MB** regardless of dataset size (routing buffers + hash array + block queue)
-   - Unsorted input uses partition flush with bounded memory (~256 MB peak, independent of dataset size)
+   - Unsorted input uses partition flush with bounded memory (~300–460 MB peak, independent of dataset size)
 4. **Build parallelism** — Block independence enables multi-worker construction pipelines. MPHF solving (the CPU-bound step) runs independently per block across workers; a coordinator sequences output. Throughput scales near-linearly with worker count
 5. **Fast construction** — Linear time, I/O-bound at NVMe speeds
 6. **Simplicity** — Straightforward implementation with standard building blocks
@@ -127,11 +127,14 @@ Reference measurements on Apple M1 Max (100M keys, MPHF mode, pre-sorted input, 
 
 | Metric              | Pre-sorted Input        | Unsorted Input                 |
 |---------------------|-------------------------|--------------------------------|
-| Build throughput (1w)| ~16 M keys/sec         | ~16 M keys/sec (~1.0× overhead ratio) |
+| Build throughput (1w)| ~16 M keys/sec         | ~16 M keys/sec                 |
+| Build throughput (4w)| ~62 M keys/sec         | ~41 M keys/sec                 |
 | Scale               | 1M – ~10¹² keys         | 1M – ~10¹² keys                |
 | Build I/O           | 1× read                 | 1× read + 1× write (partition files) |
 | Temp disk           | None                    | N × (16 + PayloadSize) bytes   |
-| Peak RAM            | ~1–75 MB                | ~256 MB (bounded, scale-invariant) |
+| Peak RAM            | ~1–75 MB                | ~300–460 MB (bounded, scale-invariant) |
+
+Unsorted builds match sorted throughput at 1 worker. At higher worker counts, unsorted builds scale well but the single-threaded partition reader becomes the bottleneck, reaching ~60% of sorted throughput at 4+ workers. Peak RAM is dominated by read-phase partition buffers (~256 MB budget) plus worker overhead.
 
 Query latency excludes disk I/O. MPHF mode requires one metadata read per query; payload mode requires a second read from the payload region. On NVMe, each read is typically ~100 µs.
 

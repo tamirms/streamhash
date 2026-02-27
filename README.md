@@ -27,11 +27,16 @@ Reference measurements on Apple M1 Max, 100M keys, MPHF mode, pre-sorted input:
 | Peak heap RAM (1 worker) | ~1 MB | ~8 MB |
 | Peak heap RAM (4 workers) | ~8 MB | ~61 MB |
 
-Unsorted input builds have comparable throughput to sorted builds (single-threaded):
+Unsorted input (100M keys, MPHF mode):
 
 | Metric | Bijection | PTRHash |
 |---|---|---|
-| Build throughput (1 worker, unsorted) | ~16 M keys/sec | ~16 M keys/sec |
+| Build throughput (1 worker, unsorted) | ~16 M keys/sec | ~15 M keys/sec |
+| Build throughput (4 workers, unsorted) | ~39 M keys/sec | ~41 M keys/sec |
+| Peak heap RAM (1 worker, unsorted) | ~316 MB | ~407 MB |
+| Peak heap RAM (4 workers, unsorted) | ~318 MB | ~431 MB |
+
+Unsorted builds match sorted throughput at 1 worker. At higher worker counts, unsorted builds scale well but reach ~60% of sorted throughput due to the single-threaded partition reader feeding workers. Peak RAM is higher than sorted mode because of read-phase partition buffers (~256 MB budget).
 
 Query latency is the same regardless of input mode. Query latency excludes disk I/O. Each query requires one metadata read (~100 µs on NVMe); payload mode adds a second read.
 
