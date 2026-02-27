@@ -46,7 +46,7 @@ The framework partitions keys into fixed-size groups, routes each key to its gro
 Two algorithms are integrated today:
 
 - **Bijection** — compact metadata encoding, ~2.46 bits/key, lowest RAM usage
-- **PTRHash** — direct pilot (per-bucket parameter that steers keys to unique slots) lookup, ~2.70 bits/key, fastest queries (~0.05 µs vs ~1.0 µs)
+- **PTRHash** — direct pilot (per-bucket parameter that steers keys to unique slots) lookup, ~2.70 bits/key, fastest queries (~0.07 µs vs ~1.5 µs)
 
 ### 1.3. When to use this
 
@@ -119,15 +119,15 @@ Reference measurements on Apple M1 Max (100M keys, MPHF mode, pre-sorted input, 
 | Metric              | Bijection               | PTRHash                        |
 |---------------------|-------------------------|--------------------------------|
 | Index size (MPHF)   | ~2.46 bits/key          | ~2.70 bits/key                 |
-| Query latency (CPU) | ~1.0 µs                 | ~0.05 µs                       |
-| Build throughput (1w)| ~16 M keys/sec         | ~16 M keys/sec                 |
-| Build throughput (4w)| ~65 M keys/sec         | ~61 M keys/sec                 |
-| Peak heap RAM (1w)  | ~1 MB                   | ~9 MB                          |
-| Peak heap RAM (4w)  | ~9 MB                   | ~74 MB                         |
+| Query latency (CPU) | ~1.5 µs                 | ~0.07 µs                       |
+| Build throughput (1w)| ~16 M keys/sec         | ~17 M keys/sec                 |
+| Build throughput (4w)| ~65 M keys/sec         | ~62 M keys/sec                 |
+| Peak heap RAM (1w)  | ~1 MB                   | ~8 MB                          |
+| Peak heap RAM (4w)  | ~8 MB                   | ~61 MB                         |
 
 | Metric              | Pre-sorted Input        | Unsorted Input                 |
 |---------------------|-------------------------|--------------------------------|
-| Build throughput (1w)| ~6 M keys/sec          | ~6 M keys/sec (~1.0× overhead ratio)  |
+| Build throughput (1w)| ~16 M keys/sec         | ~16 M keys/sec (~1.0× overhead ratio) |
 | Scale               | 1M – ~10¹² keys         | 1M – ~10¹² keys                |
 | Build I/O           | 1× read                 | 1× read + 1× write (partition files) |
 | Temp disk           | None                    | N × (16 + PayloadSize) bytes   |
@@ -143,11 +143,11 @@ Query latency excludes disk I/O. MPHF mode requires one metadata read per query;
 |---|---|---|
 | **Best for** | Compactness, low RAM | Query speed |
 | Index size | ~2.46 bits/key | ~2.70 bits/key |
-| Query latency (CPU) | ~1.0 µs | ~0.05 µs |
-| Build throughput (4w) | ~65 M keys/sec | ~61 M keys/sec |
-| Peak RAM (4w) | ~9 MB | ~74 MB |
+| Query latency (CPU) | ~1.5 µs | ~0.07 µs |
+| Build throughput (4w) | ~65 M keys/sec | ~62 M keys/sec |
+| Peak RAM (4w) | ~8 MB | ~61 MB |
 
-**Use Bijection** when index size or RAM usage matters most. Bijection achieves better compression (~2.46 vs ~2.70 bits/key) and uses ~8× less RAM during construction (~9 vs ~74 MB at 4 workers). Build throughput is similar between the two algorithms. The trade-off is higher query latency (~1.0 µs vs ~0.05 µs).
+**Use Bijection** when index size or RAM usage matters most. Bijection achieves better compression (~2.46 vs ~2.70 bits/key) and uses ~8× less RAM during construction (~8 vs ~61 MB at 4 workers). Build throughput is similar between the two algorithms. The trade-off is higher query latency (~1.5 µs vs ~0.07 µs).
 
 **Use PTRHash** when query speed is critical. PTRHash achieves O(1) queries by reading a single pilot byte — roughly 20× faster per query than Bijection's checkpoint-based O(128) decode.
 
@@ -337,7 +337,7 @@ Monolithic MPHF algorithms must solve the entire key space as a single unit — 
 
 StreamHash's block model eliminates this dependency. Each block's MPHF is solved independently: the algorithm sees only the keys routed to that block and produces a self-contained metadata blob. This enables a pipeline architecture where multiple workers solve blocks in parallel while a single coordinator writes output in block order.
 
-The pipeline is not embarrassingly parallel — the coordinator serializes file writes — but the serialized output step (writing metadata bytes and folding hashes) is fast relative to MPHF solving (the CPU-bound step). As a result, throughput scales near-linearly with worker count: 4 workers achieve ~3–4× single-threaded throughput (see §1.7).
+The pipeline is not embarrassingly parallel — the coordinator serializes file writes — but the serialized output step (writing metadata bytes and folding hashes) is fast relative to MPHF solving (the CPU-bound step). As a result, throughput scales near-linearly with worker count: 4 workers achieve ~3.5–4× single-threaded throughput (see §1.7).
 
 Queries are also naturally parallel and lock-free: the index is immutable after construction, and each query reads an independent block. No synchronization is needed between concurrent queries.
 
