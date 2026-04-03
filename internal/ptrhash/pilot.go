@@ -94,16 +94,12 @@ func pilotSlotFolded(hFolded uint64, hp uint64, numSlots uint32) uint32 {
 	return uint32(hi)
 }
 
-// pilotSlotFromHashes computes slot from both hash halves.
-// Using k0^k1 ensures:
-// 1. Slot input is independent of bucket assignment (which uses k1 only)
-// 2. 128-bit collision resistance (both k0 and k1 must match)
-//
-// See docs/PTRHASH_COMPARISON.md for design rationale.
-func pilotSlotFromHashes(k0, k1 uint64, pilot uint8, numSlots uint32, globalSeed uint64) uint32 {
-	hp := pilotHash(pilot, globalSeed)
-	hFolded := foldSlotInput(k0, k1)
-	return pilotSlotFolded(hFolded, hp, numSlots)
+// initPilotHPs precomputes pilotHash values for all 256 pilots into dst.
+// Used by both the Decoder (query path) and solver (build path).
+func initPilotHPs(dst *[numPilotValues]uint64, globalSeed uint64) {
+	for i := range dst {
+		dst[i] = pilotHash(uint8(i), globalSeed)
+	}
 }
 
 // cubicEpsBucket computes LOCAL bucket index using CubicEps distribution.

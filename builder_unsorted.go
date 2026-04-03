@@ -240,6 +240,10 @@ func (u *unsortedBuffer) addKey(k0, k1 uint64, payload uint64, blockID uint32) b
 	p := int(blockID / u.blocksPerPartU32)
 	a := u.activeBuf
 	c := u.cursorSets[a][p]
+	if c >= u.regionCap {
+		// Partition region full due to hash skew; force flush before write.
+		return true
+	}
 	u.flatBufs[a][p*u.regionCap+c] = bufferedEntry{k0: k0, k1: k1, payload: payload}
 	u.cursorSets[a][p] = c + 1
 	u.totalBuffered++

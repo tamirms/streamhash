@@ -17,6 +17,15 @@ const (
 	testSeed2 = 0xFEDCBA9876543210
 )
 
+// pilotSlotFromHashes is a test helper that computes slot from both hash halves.
+// This is the reference implementation combining pilotHash + foldSlotInput + pilotSlotFolded.
+// Production code uses precomputed pilotHPs tables instead.
+func pilotSlotFromHashes(k0, k1 uint64, pilot uint8, numSlots uint32, globalSeed uint64) uint32 {
+	hp := pilotHash(pilot, globalSeed)
+	hFolded := foldSlotInput(k0, k1)
+	return pilotSlotFolded(hFolded, hp, numSlots)
+}
+
 // Test-only helpers for generation-based slot tracking.
 // These are used by tests to set up solver state; production code uses
 // direct field access with hoisted locals for performance.

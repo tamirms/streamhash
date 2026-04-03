@@ -509,9 +509,7 @@ func (s *solver) reset(buckets [][]bucketEntry, numKeys int, globalSeed uint64, 
 	s.pinnedIdx = 0
 
 	// Precompute pilot hash values (avoids SplitMix64 per call in hot loops)
-	for p := range s.pilotHPs {
-		s.pilotHPs[p] = pilotHash(uint8(p), globalSeed)
-	}
+	initPilotHPs(&s.pilotHPs, globalSeed)
 
 	// Store reference to buckets directly (no copy!)
 	s.buckets = buckets
