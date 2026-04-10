@@ -8,7 +8,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // Named seeds for deterministic reproduction.
@@ -182,8 +182,8 @@ func TestDuplicateKeyDetection(t *testing.T) {
 			rs.reset(buckets, numKeys, testGlobalSeed, pilotsDst)
 
 			_, _, err := rs.solve()
-			if !errors.Is(err, streamerrors.ErrDuplicateKey) {
-				t.Errorf("expected streamerrors.ErrDuplicateKey, got: %v", err)
+			if !errors.Is(err, sherr.ErrDuplicateKey) {
+				t.Errorf("expected sherr.ErrDuplicateKey, got: %v", err)
 			}
 		})
 	}
@@ -194,7 +194,7 @@ func TestDuplicateKeyDetection(t *testing.T) {
 //
 // This is a regression test for a bug where the duplicate check at pilot=1
 // was skipped if anyTaken was true, causing duplicates to be reported as
-// ErrIndistinguishableHashes instead of streamerrors.ErrDuplicateKey.
+// ErrIndistinguishableHashes instead of sherr.ErrDuplicateKey.
 func TestDuplicateKeyMissedWhenPilot1SlotsTaken(t *testing.T) {
 	// Create a single bucket with 2 duplicate keys (same k0 and suffix)
 	numBuckets := 1
@@ -225,9 +225,9 @@ func TestDuplicateKeyMissedWhenPilot1SlotsTaken(t *testing.T) {
 	_, _, err := rs.solve()
 
 	// With the bug: returns ErrIndistinguishableHashes (duplicate check skipped)
-	// With the fix: returns streamerrors.ErrDuplicateKey
-	if !errors.Is(err, streamerrors.ErrDuplicateKey) {
-		t.Errorf("expected streamerrors.ErrDuplicateKey, got: %v", err)
+	// With the fix: returns sherr.ErrDuplicateKey
+	if !errors.Is(err, sherr.ErrDuplicateKey) {
+		t.Errorf("expected sherr.ErrDuplicateKey, got: %v", err)
 	}
 }
 
@@ -283,7 +283,7 @@ func TestNoDuplicatesNoError(t *testing.T) {
 		if err == nil {
 			return // Success
 		}
-		if errors.Is(err, streamerrors.ErrDuplicateKey) {
+		if errors.Is(err, sherr.ErrDuplicateKey) {
 			t.Logf("attempt %d: falsely detected duplicate key with seed %x", attempt, testGlobalSeed+uint64(attempt))
 			t.Fatalf("falsely detected duplicate key - this should never happen with unique suffixes")
 		}
@@ -589,7 +589,7 @@ func TestDuplicateKeyDetectionAllSizes(t *testing.T) {
 			s.reset(buckets, numKeys, globalSeed, pilotsDst)
 
 			_, _, err := s.solve()
-			if !errors.Is(err, streamerrors.ErrDuplicateKey) {
+			if !errors.Is(err, sherr.ErrDuplicateKey) {
 				t.Errorf("size %d: expected ErrDuplicateKey, got %v", size, err)
 			}
 		})

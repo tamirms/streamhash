@@ -6,13 +6,30 @@
 //
 // # Basic Usage
 //
-// Building an index:
+// Building an index (sorted input):
 //
-//	builder, err := streamhash.NewBuilder(ctx, "index.idx", totalKeys)
+//	builder, err := streamhash.NewSortedBuilder(ctx, "index.idx", totalKeys)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
+//	defer builder.Close()
 //	for key, payload := range sortedKeys {
+//	    if err := builder.AddKey(key, payload); err != nil {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	if err := builder.Finish(); err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// Building an index (unsorted input):
+//
+//	builder, err := streamhash.NewUnsortedBuilder(ctx, "index.idx", totalKeys, "/tmp")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer builder.Close()
+//	for key, payload := range keys {
 //	    if err := builder.AddKey(key, payload); err != nil {
 //	        log.Fatal(err)
 //	    }
@@ -29,7 +46,7 @@
 //	}
 //	defer idx.Close()
 //
-//	rank, err := idx.Query(streamhash.PreHash([]byte("mykey")))
+//	rank, err := idx.QueryRank(streamhash.PreHash([]byte("mykey")))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -39,11 +56,11 @@
 //
 // The implementation is organized as follows:
 //
-//   - Public API: builder.go (NewBuilder, AddKey, Finish), index.go (Open, Query)
+//   - Public API: builder.go (NewSortedBuilder), builder_unsorted.go (NewUnsortedBuilder), index.go (Open, QueryRank, PayloadIndex)
 //   - Configuration: builder_options.go (BuildOption, With* functions)
 //   - Serialization: header.go (header, footer, ramIndexEntry), index_writer.go
 //   - Key routing: key.go (prefix extraction, fastRange), prehash.go (PreHash)
 //   - Algorithm dispatch: algorithm.go (blockBuilder/blockDecoder interfaces, factory functions)
 //   - Block algorithms: internal/bijection/ (EF/GR), internal/ptrhash/ (Cuckoo)
-//   - Platform: fallocate_*.go (OS-specific optimizations)
+//   - Platform: platform_*.go (OS-specific: fallocate)
 package streamhash

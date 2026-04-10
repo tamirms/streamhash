@@ -15,7 +15,7 @@ import (
 	"runtime"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // ============================================================================
@@ -101,7 +101,7 @@ func TestCorruptionDetection(t *testing.T) {
 		}
 		defer idx.Close()
 		for _, key := range keys {
-			if _, err := idx.Query(key); errors.Is(err, streamerrors.ErrCorruptedIndex) {
+			if _, err := idx.QueryRank(key); errors.Is(err, sherr.ErrCorruptedIndex) {
 				return // Query detected corruption
 			}
 		}
@@ -141,7 +141,7 @@ func TestCorruptionDetection(t *testing.T) {
 
 				queryErrors := 0
 				for i := range 100 {
-					if _, err := idx.Query(keys[i%numKeys]); err != nil {
+					if _, err := idx.QueryRank(keys[i%numKeys]); err != nil {
 						queryErrors++
 					}
 				}
@@ -299,10 +299,10 @@ func TestContextCancellation(t *testing.T) {
 				numKeys := 50000
 				ctx, cancel := context.WithCancel(context.Background())
 
-				builder, err := NewBuilder(ctx, output, uint64(numKeys),
-					WithUnsortedInput(TempDir(tmpDir)), WithPayload(4), WithWorkers(workers))
+				builder, err := NewUnsortedBuilder(ctx, output, uint64(numKeys),
+					tmpDir, WithPayload(4), WithWorkers(workers))
 				if err != nil {
-					t.Fatalf("NewBuilder failed: %v", err)
+					t.Fatalf("newBuilder failed: %v", err)
 				}
 
 				rng := newTestRNG(t)
@@ -349,9 +349,9 @@ func TestContextCancellation(t *testing.T) {
 		}
 		sortKeysByBlock(keys, uint64(numKeys), nil)
 
-		builder, err := NewBuilder(childCtx, indexPath, uint64(numKeys), WithWorkers(2))
+		builder, err := NewSortedBuilder(childCtx, indexPath, uint64(numKeys), WithWorkers(2))
 		if err != nil {
-			t.Fatalf("NewBuilder failed: %v", err)
+			t.Fatalf("newBuilder failed: %v", err)
 		}
 
 		for i := 0; i < numKeys/2; i++ {
@@ -408,9 +408,9 @@ func TestGoroutineLeaks(t *testing.T) {
 			}
 			sortKeysByBlock(keys, uint64(numKeys), nil)
 
-			builder, err := NewBuilder(context.Background(), indexPath, uint64(numKeys), WithWorkers(4))
+			builder, err := NewSortedBuilder(context.Background(), indexPath, uint64(numKeys), WithWorkers(4))
 			if err != nil {
-				t.Fatalf("NewBuilder failed: %v", err)
+				t.Fatalf("newBuilder failed: %v", err)
 			}
 			for _, key := range keys {
 				if err := builder.AddKey(key, 0); err != nil {
@@ -440,10 +440,10 @@ func TestGoroutineLeaks(t *testing.T) {
 			indexPath := filepath.Join(tmpDir, "error_leak.idx")
 
 			ctx, cancel := context.WithCancel(context.Background())
-			builder, err := NewBuilder(ctx, indexPath, 1000, WithWorkers(4))
+			builder, err := NewSortedBuilder(ctx, indexPath, 1000, WithWorkers(4))
 			if err != nil {
 				cancel()
-				t.Fatalf("NewBuilder failed: %v", err)
+				t.Fatalf("newBuilder failed: %v", err)
 			}
 
 			for i := range 100 {

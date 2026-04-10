@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // TestReadEFLowBits tests the Elias-Fano low bits reading at buffer boundaries.
@@ -280,7 +280,7 @@ func TestNewDecoderErrorPath(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for non-empty globalConfig, got nil")
 		}
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("expected ErrCorruptedIndex, got: %v", err)
 		}
 	})
@@ -321,7 +321,7 @@ func TestQuerySlotErrorPaths(t *testing.T) {
 
 	t.Run("keysInBlock_zero", func(t *testing.T) {
 		_, err := dec.QuerySlot(keys[0].k0, keys[0].k1, validMeta, 0)
-		if !errors.Is(err, streamerrors.ErrNotFound) {
+		if !errors.Is(err, sherr.ErrNotFound) {
 			t.Errorf("expected ErrNotFound, got: %v", err)
 		}
 	})
@@ -330,7 +330,7 @@ func TestQuerySlotErrorPaths(t *testing.T) {
 		// checkpointsSize is 28 bytes; pass fewer
 		truncated := make([]byte, checkpointsSize-1)
 		_, err := dec.QuerySlot(keys[0].k0, keys[0].k1, truncated, numKeys)
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("expected ErrCorruptedIndex, got: %v", err)
 		}
 	})
@@ -341,7 +341,7 @@ func TestQuerySlotErrorPaths(t *testing.T) {
 		exactCP := make([]byte, checkpointsSize)
 		copy(exactCP, validMeta[:checkpointsSize])
 		_, err := dec.QuerySlot(keys[0].k0, keys[0].k1, exactCP, numKeys)
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("expected ErrCorruptedIndex, got: %v", err)
 		}
 	})
@@ -359,7 +359,7 @@ func TestQuerySlotErrorPaths(t *testing.T) {
 		// All inserted keys hash to non-empty buckets, so they all reach the
 		// seedStreamOffset guard and return ErrCorruptedIndex.
 		_, err := dec.QuerySlot(keys[0].k0, keys[0].k1, truncated, numKeys)
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("expected ErrCorruptedIndex, got: %v", err)
 		}
 	})
@@ -373,7 +373,7 @@ func TestQuerySlotErrorPaths(t *testing.T) {
 			k0 := probeRNG.Uint64()
 			k1 := probeRNG.Uint64()
 			_, err := dec.QuerySlot(k0, k1, validMeta, numKeys)
-			if errors.Is(err, streamerrors.ErrNotFound) {
+			if errors.Is(err, sherr.ErrNotFound) {
 				gotNotFound = true
 				break
 			}

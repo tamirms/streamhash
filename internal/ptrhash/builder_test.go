@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 	"github.com/tamirms/streamhash/internal/encoding"
 )
 
@@ -147,7 +147,7 @@ func TestBlockOverflowReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ErrBlockOverflow, got nil")
 	}
-	if !errors.Is(err, streamerrors.ErrBlockOverflow) {
+	if !errors.Is(err, sherr.ErrBlockOverflow) {
 		t.Fatalf("expected ErrBlockOverflow, got: %v", err)
 	}
 }

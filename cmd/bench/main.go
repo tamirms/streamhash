@@ -1,18 +1,17 @@
-// Bench is a benchmarking tool for measuring StreamHash MPHF build performance,
-// query throughput, and memory usage.
+// Bench is a benchmarking and data generation tool for StreamHash.
 //
-// Usage:
+// Subcommands:
+//
+//	(default)     In-memory benchmark with synthetic keys
+//	gen           Generate random entry files (sorted or unsorted)
+//	bench-files   Benchmark building an index from entry files on disk
+//
+// Examples:
 //
 //	go run ./cmd/bench -keys 10000000 -payload 4 -algo ptrhash
-//
-// Flags:
-//
-//	-keys      Number of keys to index (default: 10,000,000)
-//	-payload   Payload size in bytes, 0 for MPHF-only (default: 4)
-//	-fp        Fingerprint size in bytes (default: 1)
-//	-workers   Number of parallel workers (default: 1)
-//	-sorted    Use sorted input mode (default: true)
-//	-algo      Algorithm: bijection or ptrhash (default: bijection)
+//	go run ./cmd/bench gen -out /data/sorted -files 1000
+//	go run ./cmd/bench gen -out /data/unsorted -files 1000 -sorted=false
+//	go run ./cmd/bench bench-files -mode unsorted -cw 8 -dir /data/unsorted -out index.bin
 package main
 
 import (
@@ -53,11 +52,25 @@ func getMaxRSS() uint64 {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "gen":
+			os.Args = os.Args[1:]
+			mainGen()
+			return
+		case "bench-files":
+			os.Args = os.Args[1:]
+			mainBenchFiles()
+			return
+		}
+	}
+
 	keysFlag := flag.Int("keys", 10_000_000, "number of keys")
 	payloadFlag := flag.Int("payload", 4, "payload size in bytes (0 for MPHF-only)")
 	fpFlag := flag.Int("fp", 1, "fingerprint size in bytes")
 	workersFlag := flag.Int("workers", 1, "number of parallel workers for building")
 	sortedFlag := flag.Bool("sorted", true, "use sorted input mode (false = unsorted input mode)")
+	cwFlag := flag.Int("cw", 0, "number of concurrent writers (0 = single-threaded AddKey)")
 	algoFlag := flag.String("algo", "bijection", "algorithm: bijection or ptrhash")
 	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to file (build phase only)")
 	memprofile := flag.String("memprofile", "", "write memory profile to file (build phase only)")
@@ -184,15 +197,8 @@ func main() {
 
 	buildStart := time.Now()
 
-	// Configure builder options
-	opts := []streamhash.BuildOption{
-		streamhash.WithPayload(payloadSize),
-		streamhash.WithFingerprint(fpSize),
-		streamhash.WithWorkers(*workersFlag),
-	}
-
 	// Algorithm selection
-	var algo streamhash.BlockAlgorithmID
+	var algo streamhash.Algorithm
 	switch *algoFlag {
 	case "bijection":
 		algo = streamhash.AlgoBijection
@@ -202,31 +208,92 @@ func main() {
 		fmt.Printf("Unknown algorithm: %s (use 'bijection' or 'ptrhash')\n", *algoFlag)
 		return
 	}
-	opts = append(opts, streamhash.WithAlgorithm(algo))
 
-	if !sortedMode {
-		opts = append(opts, streamhash.WithUnsortedInput(streamhash.TempDir(tmpDir)))
+	opts := []streamhash.BuildOption{
+		streamhash.WithPayload(payloadSize),
+		streamhash.WithFingerprint(fpSize),
+		streamhash.WithWorkers(*workersFlag),
+		streamhash.WithAlgorithm(algo),
 	}
 
-	builder, err := streamhash.NewBuilder(context.Background(), indexPath, uint64(numKeys), opts...)
-	if err != nil {
-		fmt.Printf("NewBuilder failed: %v\n", err)
-		return
-	}
-	for i := range keys {
-		var payload uint64
-		if payloads != nil {
-			payload = payloads[i]
-		}
-		if err := builder.AddKey(keys[i][:], payload); err != nil {
-			_ = builder.Close() // Best-effort cleanup; primary error is AddKey failure
-			fmt.Printf("AddKey failed: %v\n", err)
+	numCW := *cwFlag
+	var addKeyDuration, finishDuration time.Duration
+	var buildErr error
+
+	if sortedMode {
+		sb, err := streamhash.NewSortedBuilder(context.Background(), indexPath, uint64(numKeys), opts...)
+		if err != nil {
+			fmt.Printf("NewSortedBuilder failed: %v\n", err)
 			return
 		}
+		for i := range keys {
+			var payload uint64
+			if payloads != nil {
+				payload = payloads[i]
+			}
+			if err := sb.AddKey(keys[i][:], payload); err != nil {
+				_ = sb.Close()
+				fmt.Printf("AddKey failed: %v\n", err)
+				return
+			}
+		}
+		addKeyDuration = time.Since(buildStart)
+		finishStart := time.Now()
+		buildErr = sb.Finish()
+		finishDuration = time.Since(finishStart)
+	} else if numCW > 0 {
+		ub, err := streamhash.NewUnsortedBuilder(context.Background(), indexPath, uint64(numKeys), tmpDir, opts...)
+		if err != nil {
+			fmt.Printf("NewUnsortedBuilder failed: %v\n", err)
+			return
+		}
+		keysPerWriter := numKeys / numCW
+		buildErr = ub.AddKeys(numCW, func(writerID int, addKey func([]byte, uint64) error) error {
+			start := writerID * keysPerWriter
+			end := start + keysPerWriter
+			if writerID == numCW-1 {
+				end = numKeys
+			}
+			for i := start; i < end; i++ {
+				var payload uint64
+				if payloads != nil {
+					payload = payloads[i]
+				}
+				if err := addKey(keys[i][:], payload); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		addKeyDuration = time.Since(buildStart)
+		// AddKeys calls Finish internally
+	} else {
+		ub, err := streamhash.NewUnsortedBuilder(context.Background(), indexPath, uint64(numKeys), tmpDir, opts...)
+		if err != nil {
+			fmt.Printf("NewUnsortedBuilder failed: %v\n", err)
+			return
+		}
+		for i := range keys {
+			var payload uint64
+			if payloads != nil {
+				payload = payloads[i]
+			}
+			if err := ub.AddKey(keys[i][:], payload); err != nil {
+				_ = ub.Close()
+				fmt.Printf("AddKey failed: %v\n", err)
+				return
+			}
+		}
+		addKeyDuration = time.Since(buildStart)
+		finishStart := time.Now()
+		buildErr = ub.Finish()
+		finishDuration = time.Since(finishStart)
 	}
-	err = builder.Finish()
 
 	buildDuration := time.Since(buildStart)
+	fmt.Printf("  AddKey: %.2fs (%.1f M/sec), Finish: %.2fs\n",
+		addKeyDuration.Seconds(), float64(numKeys)/addKeyDuration.Seconds()/1e6,
+		finishDuration.Seconds())
 
 	// Stop CPU profile after build phase
 	if *cpuprofile != "" {
@@ -263,8 +330,8 @@ func main() {
 	peakHeapMem := peakAlloc.Load() - baseline.Alloc
 	peakRSSMem := peakRSS.Load() - baselineRSS
 
-	if err != nil {
-		fmt.Printf("Build failed: %v\n", err)
+	if buildErr != nil {
+		fmt.Printf("Build failed: %v\n", buildErr)
 		return
 	}
 
@@ -282,16 +349,26 @@ func main() {
 	}
 	defer func() { _ = idx.Close() }()
 
+	// Open as PayloadIndex if payloads are present
+	var pidx *streamhash.PayloadIndex
+	if payloadSize > 0 {
+		pidx, err = idx.WithPayload()
+		if err != nil {
+			fmt.Printf("WithPayload failed: %v\n", err)
+			return
+		}
+	}
+
 	// Randomize query order to ensure consistent access patterns
 	// regardless of whether keys were sorted or not
 	queryOrder := mrand.Perm(numKeys)
 
 	fmt.Println("Warming up queries...")
 	for i := range 10000 {
-		if payloadSize > 0 {
-			_, _ = idx.QueryPayload(keys[queryOrder[i%numKeys]][:]) // Benchmark: measuring throughput, not correctness
+		if pidx != nil {
+			_, _, _ = pidx.QueryPayload(keys[queryOrder[i%numKeys]][:])
 		} else {
-			_, _ = idx.Query(keys[queryOrder[i%numKeys]][:])
+			_, _ = idx.QueryRank(keys[queryOrder[i%numKeys]][:])
 		}
 	}
 
@@ -299,10 +376,10 @@ func main() {
 	numQueries := 100000
 	queryStart := time.Now()
 	for i := range numQueries {
-		if payloadSize > 0 {
-			_, _ = idx.QueryPayload(keys[queryOrder[i%numKeys]][:])
+		if pidx != nil {
+			_, _, _ = pidx.QueryPayload(keys[queryOrder[i%numKeys]][:])
 		} else {
-			_, _ = idx.Query(keys[queryOrder[i%numKeys]][:])
+			_, _ = idx.QueryRank(keys[queryOrder[i%numKeys]][:])
 		}
 	}
 	queryDuration := time.Since(queryStart)

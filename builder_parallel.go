@@ -49,7 +49,7 @@ type blockResult struct {
 
 // initParallelWorkers initializes channels, pools, and starts worker/writer goroutines
 // for parallel building. Used by both sorted parallel mode and unsorted parallel mode.
-func (b *Builder) initParallelWorkers() {
+func (b *builder) initParallelWorkers() {
 	b.workChan = make(chan blockWork, b.workers*workChanBufferMultiplier)
 	b.resultChan = make(chan blockResult, b.workers*workChanBufferMultiplier)
 	b.writerDone = make(chan error, 1)
@@ -86,7 +86,7 @@ func (b *Builder) initParallelWorkers() {
 // Writer errors are detected at block boundaries (dispatchBlock/dispatchEmptyBlock
 // check writerDone in their blocking select) and periodically via AddKey's context
 // check interval. This avoids per-entry channel overhead (~3-5ns × 10M keys).
-func (b *Builder) addKeyParallel(k0, k1 uint64, payload uint64, blockIdx uint32) error {
+func (b *builder) addKeyParallel(k0, k1 uint64, payload uint64, blockIdx uint32) error {
 	if b.firstKey {
 		// Dispatch empty blocks for indices 0 to blockIdx-1
 		for b.nextBlockToWrite < blockIdx {
@@ -126,7 +126,7 @@ func (b *Builder) addKeyParallel(k0, k1 uint64, payload uint64, blockIdx uint32)
 
 // dispatchBlock sends the pending block to workers for building (sorted mode).
 // Wraps dispatchBlockWork with pendingEntries management.
-func (b *Builder) dispatchBlock() error {
+func (b *builder) dispatchBlock() error {
 	entries := b.pendingEntries
 	b.pendingEntries = b.getEntrySlice()
 	return b.dispatchBlockWork(b.currentBlockIdx, entries, true)
@@ -136,7 +136,7 @@ func (b *Builder) dispatchBlock() error {
 // Maintains keysBefore as a running accumulator for payload offset calculation.
 // Used by both sorted mode (via dispatchBlock) and unsorted mode directly.
 // The pooled flag indicates whether entries should be returned to the pool after use.
-func (b *Builder) dispatchBlockWork(blockID uint32, entries []routedEntry, pooled bool) error {
+func (b *builder) dispatchBlockWork(blockID uint32, entries []routedEntry, pooled bool) error {
 	work := blockWork{
 		blockID:    blockID,
 		entries:    entries,
@@ -160,7 +160,7 @@ func (b *Builder) dispatchBlockWork(blockID uint32, entries []routedEntry, poole
 // dispatchEmptyBlock sends an empty block to workers.
 // Updates nextBlockToWrite for consistency with dispatchBlockWork.
 // keysBefore is unchanged: empty blocks have no payloads, so the payload offset is not advanced.
-func (b *Builder) dispatchEmptyBlock(blockID uint32) error {
+func (b *builder) dispatchEmptyBlock(blockID uint32) error {
 	work := blockWork{
 		blockID:    blockID,
 		entries:    nil,
@@ -180,7 +180,7 @@ func (b *Builder) dispatchEmptyBlock(blockID uint32) error {
 }
 
 // runWorker is the worker goroutine that builds blocks in parallel.
-func (b *Builder) runWorker() error {
+func (b *builder) runWorker() error {
 	// Create block builder for this worker
 	blkBuilder, err := newBlockBuilder(b.cfg.algorithm, b.cfg.totalKeys, b.cfg.globalSeed, b.cfg.payloadSize, b.cfg.fingerprintSize)
 	if err != nil {
@@ -254,9 +254,9 @@ func (b *Builder) runWorker() error {
 
 				// Compute payload hash and write payloads while data is hot in CPU cache
 				if payloadsNeeded > 0 {
-					// Hash payload buffer before writing to mmap
+					// Hash payload buffer before writing via pwrite
 					payloadHash = xxhash.Sum64(payloadsBuf[:payloadsNeeded])
-					// Write payloads to mmap, then buffer can be reused
+					// Write payloads via pwrite, then buffer can be reused
 					payloadOffset := work.keysBefore * uint64(entrySize)
 					if werr := b.iw.writePayloadsDirect(payloadsBuf, payloadOffset); werr != nil {
 						buildErr = werr
@@ -304,7 +304,7 @@ func (b *Builder) runWorker() error {
 //
 // Streaming hash: The writer folds payload hashes in block order into the streaming
 // hasher. This produces a deterministic hash-of-hashes that can be verified at read time.
-func (b *Builder) runWriter() {
+func (b *builder) runWriter() {
 	defer close(b.writerDone)
 
 	pending := make(map[uint32]blockResult)
@@ -327,7 +327,10 @@ func (b *Builder) runWriter() {
 
 			// Write only metadata (payloads already written directly by workers)
 			// writeMetadata also updates the streaming metadata hasher
-			b.iw.writeMetadata(r.metadata, r.numKeys)
+			if err := b.iw.writeMetadata(r.metadata, r.numKeys); err != nil {
+				b.writerDone <- err
+				return
+			}
 
 			// Return metadata buffer to pool for reuse
 			b.metadataPool.Put(r.metadata[:cap(r.metadata)])
@@ -347,7 +350,7 @@ func (b *Builder) runWriter() {
 // Note: If writer panics, the defer in runWriter closes writerDone,
 // so this wait receives nil (no deadlock). A stuck writer would block
 // forever, but that indicates a bug that a timeout would only mask.
-func (b *Builder) finishParallel() error {
+func (b *builder) finishParallel() error {
 	// Check for writer errors first
 	if b.writerErr != nil {
 		return errors.Join(b.writerErr, b.cleanup())
@@ -376,7 +379,7 @@ func (b *Builder) finishParallel() error {
 
 // drainParallelPipeline closes the work channel, waits for workers and writer
 // to finish, then finalizes the index.
-func (b *Builder) drainParallelPipeline() error {
+func (b *builder) drainParallelPipeline() error {
 	// Close work channel to signal workers we're done
 	close(b.workChan)
 	b.workersShutDown = true // Prevents double-close in Close()/shutdownWorkers()
@@ -406,7 +409,7 @@ func (b *Builder) drainParallelPipeline() error {
 //
 // Cancel is called first to unblock workers that may be stuck waiting to
 // send results (e.g., when the writer has already exited due to an error).
-func (b *Builder) shutdownWorkers() {
+func (b *builder) shutdownWorkers() {
 	if b.workersShutDown || b.workChan == nil {
 		return
 	}
@@ -421,12 +424,12 @@ func (b *Builder) shutdownWorkers() {
 }
 
 // getEntrySlice gets a []routedEntry slice from the pool.
-func (b *Builder) getEntrySlice() []routedEntry {
+func (b *builder) getEntrySlice() []routedEntry {
 	return b.entryPool.Get().([]routedEntry)[:0]
 }
 
 // putEntrySlice returns a []routedEntry slice to the pool.
-func (b *Builder) putEntrySlice(s []routedEntry) {
+func (b *builder) putEntrySlice(s []routedEntry) {
 	//lint:ignore SA6002 slice value boxing is acceptable; pointer-to-slice adds complexity
 	b.entryPool.Put(s[:0]) //nolint:staticcheck
 }

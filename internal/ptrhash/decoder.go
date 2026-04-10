@@ -3,7 +3,7 @@ package ptrhash
 import (
 	"fmt"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // Decoder handles query-time slot computation for PTRHash blocks.
@@ -16,7 +16,7 @@ type Decoder struct {
 // Returns an error if globalConfig is unexpectedly non-empty.
 func NewDecoder(globalConfig []byte, globalSeed uint64) (*Decoder, error) {
 	if len(globalConfig) != 0 {
-		return nil, fmt.Errorf("%w: ptrhash: unexpected non-empty global config (len=%d)", streamerrors.ErrCorruptedIndex, len(globalConfig))
+		return nil, fmt.Errorf("%w: ptrhash: unexpected non-empty global config (len=%d)", sherr.ErrCorruptedIndex, len(globalConfig))
 	}
 	d := &Decoder{}
 	initPilotHPs(&d.pilotHPs, globalSeed)
@@ -30,7 +30,7 @@ func NewDecoder(globalConfig []byte, globalSeed uint64) (*Decoder, error) {
 // Returns the local slot index (0-based within the block).
 func (d *Decoder) QuerySlot(k0, k1 uint64, metadata []byte, keysInBlock int) (int, error) {
 	if keysInBlock == 0 {
-		return 0, streamerrors.ErrNotFound
+		return 0, sherr.ErrNotFound
 	}
 
 	numBuckets := bucketsPerBlock
@@ -38,7 +38,7 @@ func (d *Decoder) QuerySlot(k0, k1 uint64, metadata []byte, keysInBlock int) (in
 
 	// Pilot section: 8 bits per bucket (direct bytes)
 	if len(metadata) < numBuckets {
-		return 0, streamerrors.ErrCorruptedIndex
+		return 0, sherr.ErrCorruptedIndex
 	}
 
 	// Use k1 (bytes 8-15 as little-endian) as the suffix for bucket assignment.

@@ -18,7 +18,7 @@ import (
 	"sync"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // ============================================================================
@@ -97,7 +97,7 @@ func TestConcurrentQueries(t *testing.T) {
 			defer wg.Done()
 			for i := range queriesPerWorker {
 				keyIdx := (workerID*queriesPerWorker + i) % len(keys)
-				rank, err := idx.Query(keys[keyIdx])
+				rank, err := idx.QueryRank(keys[keyIdx])
 				if err != nil {
 					errCh <- err
 				} else {
@@ -157,7 +157,7 @@ func TestConcurrentQueryAfterParallelBuild(t *testing.T) {
 		wg.Add(1)
 		go func(ki int, k []byte) {
 			defer wg.Done()
-			rank, err := idx.Query(k)
+			rank, err := idx.QueryRank(k)
 			if err != nil {
 				errCh <- err
 			} else {
@@ -381,7 +381,7 @@ func TestFingerprintFalsePositiveRate(t *testing.T) {
 
 	algos := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
@@ -420,7 +420,7 @@ func TestFingerprintFalsePositiveRate(t *testing.T) {
 					memberErrors := 0
 					for i := range 100 {
 						keyIdx := i * (n / 100)
-						if _, err := idx.Query(keys[keyIdx]); err != nil {
+						if _, err := idx.QueryRank(keys[keyIdx]); err != nil {
 							memberErrors++
 						}
 					}
@@ -443,7 +443,7 @@ func TestFingerprintFalsePositiveRate(t *testing.T) {
 							}
 						}
 
-						if _, err := idx.Query(key); err == nil {
+						if _, err := idx.QueryRank(key); err == nil {
 							falsePositives++
 						}
 					}
@@ -529,7 +529,7 @@ func TestRapidOpenClose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Iteration %d: Open failed: %v", i, err)
 		}
-		if _, err := idx.Query(keys[0]); err != nil {
+		if _, err := idx.QueryRank(keys[0]); err != nil {
 			idx.Close()
 			t.Fatalf("Iteration %d: Query failed: %v", i, err)
 		}
@@ -611,13 +611,17 @@ func TestSameK1DifferentK0(t *testing.T) {
 		payloads[i] = uint64(i)
 	}
 
-	idx := buildAndOpen(t, keys, payloads,
+	idx := buildAndOpenUnsorted(t, keys, payloads, t.TempDir(),
 		WithFingerprint(4), WithPayload(4),
-		WithAlgorithm(AlgoPTRHash), WithUnsortedInput(TempDir(t.TempDir())))
+		WithAlgorithm(AlgoPTRHash))
 	defer idx.Close()
 
+	pi, err := idx.WithPayload()
+	if err != nil {
+		t.Fatalf("WithPayload: %v", err)
+	}
 	for i, key := range keys {
-		payload, err := idx.QueryPayload(key)
+		_, payload, err := pi.QueryPayload(key)
 		if err != nil {
 			t.Errorf("QueryPayload failed for key %d: %v", i, err)
 			continue
@@ -664,7 +668,7 @@ func TestFingerprintKeyLengths(t *testing.T) {
 
 	algos := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
@@ -689,13 +693,17 @@ func TestFingerprintKeyLengths(t *testing.T) {
 						payloads[i] = uint64(i)
 					}
 
-					idx := buildAndOpen(t, keys, payloads,
+					idx := buildAndOpenUnsorted(t, keys, payloads, t.TempDir(),
 						WithFingerprint(fpCfg.fpSize), WithPayload(4),
-						WithAlgorithm(algo.algo), WithUnsortedInput(TempDir(t.TempDir())))
+						WithAlgorithm(algo.algo))
 					defer idx.Close()
 
+					pi, err := idx.WithPayload()
+					if err != nil {
+						t.Fatalf("WithPayload: %v", err)
+					}
 					for i, key := range keys {
-						payload, err := idx.QueryPayload(key)
+						_, payload, err := pi.QueryPayload(key)
 						if err != nil {
 							t.Errorf("QueryPayload failed for key %d: %v", i, err)
 							continue
@@ -750,8 +758,8 @@ func TestPTRHashErrIndistinguishableHashes(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for keys with identical first 16 bytes, got success")
 	}
-	if !errors.Is(err, streamerrors.ErrIndistinguishableHashes) &&
-		!errors.Is(err, streamerrors.ErrDuplicateKey) {
+	if !errors.Is(err, sherr.ErrIndistinguishableHashes) &&
+		!errors.Is(err, sherr.ErrDuplicateKey) {
 		t.Fatalf("expected ErrIndistinguishableHashes or ErrDuplicateKey, got: %v", err)
 	}
 }

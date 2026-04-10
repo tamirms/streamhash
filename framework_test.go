@@ -71,7 +71,7 @@ func TestExtractPrefix(t *testing.T) {
 func TestNumBlocksEdgeCases(t *testing.T) {
 	algos := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
@@ -104,7 +104,7 @@ func TestNumBlocksEdgeCases(t *testing.T) {
 func TestNumBlocksOverflowProtection(t *testing.T) {
 	algos := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
@@ -222,9 +222,9 @@ func TestDispatchEmptyBlockDirect(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		builder, err := NewBuilder(ctx, output+"_cancel", 10000, WithWorkers(2))
+		builder, err := NewSortedBuilder(ctx, output+"_cancel", 10000, WithWorkers(2))
 		if err != nil {
-			t.Fatalf("NewBuilder failed: %v", err)
+			t.Fatalf("newBuilder failed: %v", err)
 		}
 
 		src := make([]byte, 20)
@@ -237,7 +237,7 @@ func TestDispatchEmptyBlockDirect(t *testing.T) {
 
 		var lastErr error
 		for i := range uint32(200) {
-			err = builder.dispatchEmptyBlock(i)
+			err = builder.b.dispatchEmptyBlock(i)
 			if err != nil {
 				lastErr = err
 				break
@@ -254,13 +254,13 @@ func TestDispatchEmptyBlockDirect(t *testing.T) {
 	t.Run("NormalParallel", func(t *testing.T) {
 		ctx := context.Background()
 
-		builder, err := NewBuilder(ctx, output+"_normal", 10000, WithWorkers(2))
+		builder, err := NewSortedBuilder(ctx, output+"_normal", 10000, WithWorkers(2))
 		if err != nil {
-			t.Fatalf("NewBuilder failed: %v", err)
+			t.Fatalf("newBuilder failed: %v", err)
 		}
 
 		for i := range uint32(10) {
-			err = builder.dispatchEmptyBlock(i)
+			err = builder.b.dispatchEmptyBlock(i)
 			if err != nil {
 				t.Errorf("dispatchEmptyBlock failed: %v", err)
 				break
@@ -289,9 +289,9 @@ func TestVerifyFingerprintSeparatedDirect(t *testing.T) {
 	sortKeysByBlock(keys, uint64(numKeys), []BuildOption{WithFingerprint(fpSize)})
 
 	ctx := context.Background()
-	builder, err := NewBuilder(ctx, output, uint64(numKeys), WithFingerprint(fpSize))
+	builder, err := NewSortedBuilder(ctx, output, uint64(numKeys), WithFingerprint(fpSize))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 
 	for _, key := range keys {
@@ -313,7 +313,7 @@ func TestVerifyFingerprintSeparatedDirect(t *testing.T) {
 
 	t.Run("MatchingFingerprint", func(t *testing.T) {
 		// First find the actual rank for keys[0]
-		rank, err := idx.Query(keys[0])
+		rank, err := idx.QueryRank(keys[0])
 		if err != nil {
 			t.Fatalf("Query failed: %v", err)
 		}
@@ -380,7 +380,7 @@ func TestPreHashInPlace(t *testing.T) {
 	key := []byte("test-key-for-prehash")
 	dst := make([]byte, 16)
 
-	PreHashInPlace(key, dst)
+	PreHashInPlace(dst, key)
 	expected := PreHash(key)
 
 	if !bytes.Equal(dst, expected) {
@@ -422,7 +422,7 @@ func TestPreHashInPlaceDoesNotModifySource(t *testing.T) {
 	copy(key, original)
 
 	dst := make([]byte, 16)
-	PreHashInPlace(key, dst)
+	PreHashInPlace(dst, key)
 
 	if !bytes.Equal(key, original) {
 		t.Error("PreHashInPlace should not modify source key")
@@ -469,15 +469,15 @@ func TestIndexAccessors(t *testing.T) {
 	if idx.NumBlocks() == 0 {
 		t.Error("NumBlocks() returned 0")
 	}
-	if !idx.HasPayload() {
-		t.Error("HasPayload() returned false for index with payload")
+	if idx.PayloadSize() == 0 {
+		t.Error("PayloadSize() returned 0 for index with payload")
 	}
 	if idx.PayloadSize() != 4 {
 		t.Errorf("PayloadSize() = %d, want 4", idx.PayloadSize())
 	}
 }
 
-// TestIndexAccessorsNoPayload verifies HasPayload returns false for MPHF-only index.
+// TestIndexAccessorsNoPayload verifies PayloadSize returns 0 for MPHF-only index.
 func TestIndexAccessorsNoPayload(t *testing.T) {
 	rng := newTestRNG(t)
 	keys := generateRandomKeys(rng, 50, 24)
@@ -486,28 +486,28 @@ func TestIndexAccessorsNoPayload(t *testing.T) {
 	idx := buildAndOpen(t, keys, nil)
 	defer idx.Close()
 
-	if idx.HasPayload() {
-		t.Error("HasPayload() returned true for MPHF-only index")
+	if idx.PayloadSize() != 0 {
+		t.Error("PayloadSize() returned non-zero for MPHF-only index")
 	}
 	if idx.PayloadSize() != 0 {
 		t.Errorf("PayloadSize() = %d, want 0", idx.PayloadSize())
 	}
 }
 
-// TestAlgorithmString verifies BlockAlgorithmID.String().
+// TestAlgorithmString verifies Algorithm.String().
 func TestAlgorithmString(t *testing.T) {
 	tests := []struct {
-		algo BlockAlgorithmID
+		algo Algorithm
 		want string
 	}{
 		{AlgoBijection, "bijection"},
 		{AlgoPTRHash, "ptrhash"},
-		{BlockAlgorithmID(99), "unknown"},
+		{Algorithm(99), "unknown"},
 	}
 	for _, tc := range tests {
 		got := tc.algo.String()
 		if got != tc.want {
-			t.Errorf("BlockAlgorithmID(%d).String() = %q, want %q", tc.algo, got, tc.want)
+			t.Errorf("Algorithm(%d).String() = %q, want %q", tc.algo, got, tc.want)
 		}
 	}
 }
@@ -561,7 +561,7 @@ func TestHeaderRoundtrip(t *testing.T) {
 			PayloadSize:     uint32(rng.IntN(int(maxPayloadSize) + 1)),    // [0, 8]
 			FingerprintSize: uint8(rng.IntN(int(maxFingerprintSize) + 1)), // [0, 4]
 			Seed:            rng.Uint64(),
-			BlockAlgorithm:  BlockAlgorithmID(rng.IntN(2)), // 0 or 1
+			BlockAlgorithm:  Algorithm(rng.IntN(2)), // 0 or 1
 		}
 
 		h.encodeTo(buf)
@@ -827,11 +827,11 @@ func TestStatsFields(t *testing.T) {
 		if stats.PayloadSize != payloadSize {
 			t.Errorf("PayloadSize: got %d, want %d", stats.PayloadSize, payloadSize)
 		}
-		if !stats.Fingerprints {
-			t.Error("Fingerprints: got false, want true")
+		if stats.FingerprintSize == 0 {
+			t.Error("FingerprintSize: got 0, want > 0")
 		}
-		if stats.IndexSize <= 0 {
-			t.Errorf("IndexSize: got %d, want > 0", stats.IndexSize)
+		if stats.FileSize <= 0 {
+			t.Errorf("FileSize: got %d, want > 0", stats.FileSize)
 		}
 		if stats.BitsPerKey <= 0 {
 			t.Errorf("BitsPerKey: got %f, want > 0", stats.BitsPerKey)
@@ -869,11 +869,11 @@ func TestStatsFields(t *testing.T) {
 		if stats.PayloadSize != payloadSize {
 			t.Errorf("PayloadSize: got %d, want %d", stats.PayloadSize, payloadSize)
 		}
-		if stats.Fingerprints {
-			t.Error("Fingerprints: got true, want false")
+		if stats.FingerprintSize > 0 {
+			t.Errorf("FingerprintSize: got %d, want 0", stats.FingerprintSize)
 		}
-		if stats.IndexSize <= 0 {
-			t.Errorf("IndexSize: got %d, want > 0", stats.IndexSize)
+		if stats.FileSize <= 0 {
+			t.Errorf("FileSize: got %d, want > 0", stats.FileSize)
 		}
 		if stats.BitsPerKey <= 0 {
 			t.Errorf("BitsPerKey: got %f, want > 0", stats.BitsPerKey)

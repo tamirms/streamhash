@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // TestNewDecoder tests the NewDecoder constructor.
@@ -34,7 +34,7 @@ func TestNewDecoder(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for non-empty config")
 		}
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("expected ErrCorruptedIndex, got: %v", err)
 		}
 	})
@@ -50,7 +50,7 @@ func TestDecoderQuerySlotErrorPaths(t *testing.T) {
 	t.Run("keysInBlock_zero", func(t *testing.T) {
 		meta := make([]byte, bucketsPerBlock+10)
 		_, err := dec.QuerySlot(0x1111, 0x2222, meta, 0)
-		if !errors.Is(err, streamerrors.ErrNotFound) {
+		if !errors.Is(err, sherr.ErrNotFound) {
 			t.Errorf("expected ErrNotFound, got: %v", err)
 		}
 	})
@@ -59,7 +59,7 @@ func TestDecoderQuerySlotErrorPaths(t *testing.T) {
 		// Metadata shorter than numBuckets triggers ErrCorruptedIndex.
 		truncated := make([]byte, bucketsPerBlock-1)
 		_, err := dec.QuerySlot(0x1111, 0x2222, truncated, 100)
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("expected ErrCorruptedIndex, got: %v", err)
 		}
 	})
@@ -146,7 +146,7 @@ func TestDecoderQuerySlotEmptyBlock(t *testing.T) {
 	}
 
 	_, err = decoder.QuerySlot(0x1111, 0x2222, metadata, 0)
-	if !errors.Is(err, streamerrors.ErrNotFound) {
+	if !errors.Is(err, sherr.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for empty block, got: %v", err)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"slices"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // buildTestIndex builds a test MPHF index and returns the file path and sorted keys.
@@ -99,8 +99,8 @@ func TestOpenBytesMatchesOpen(t *testing.T) {
 	defer idxBytes.Close()
 
 	for i, key := range keys {
-		r1, err1 := idxMmap.Query(key)
-		r2, err2 := idxBytes.Query(key)
+		r1, err1 := idxMmap.QueryRank(key)
+		r2, err2 := idxBytes.QueryRank(key)
 		if err1 != nil || err2 != nil {
 			t.Errorf("key %d: Open err=%v, OpenBytes err=%v", i, err1, err2)
 			continue
@@ -115,7 +115,7 @@ func TestOpenBytesMatchesOpen(t *testing.T) {
 // with ErrTruncatedFile.
 func TestOpenBytesTruncated(t *testing.T) {
 	_, err := OpenBytes(make([]byte, 100))
-	if !errors.Is(err, streamerrors.ErrTruncatedFile) {
+	if !errors.Is(err, sherr.ErrTruncatedFile) {
 		t.Fatalf("expected ErrTruncatedFile, got %v", err)
 	}
 }
@@ -144,8 +144,8 @@ func TestOpenBytesCloseIsNoop(t *testing.T) {
 	}
 
 	// Queries should fail after close.
-	_, err = idx.Query(keys[0])
-	if !errors.Is(err, streamerrors.ErrIndexClosed) {
+	_, err = idx.QueryRank(keys[0])
+	if !errors.Is(err, sherr.ErrIndexClosed) {
 		t.Errorf("Query after Close: expected ErrIndexClosed, got %v", err)
 	}
 }

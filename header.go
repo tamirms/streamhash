@@ -3,7 +3,7 @@ package streamhash
 import (
 	"encoding/binary"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 const (
@@ -54,7 +54,7 @@ type header struct {
 	PayloadSize     uint32           // 4 bytes: payload bytes per key (0 = MPHF only)
 	FingerprintSize uint8            // 1 byte: fingerprint bytes (0 = none)
 	Seed            uint64           // 8 bytes: global seed for hashing
-	BlockAlgorithm  BlockAlgorithmID // 2 bytes: algorithm (0=Bijection, 1=PTRHash)
+	BlockAlgorithm  Algorithm // 2 bytes: algorithm (0=Bijection, 1=PTRHash)
 	Reserved        [27]byte         // 27 bytes: reserved (zero)
 }
 
@@ -75,7 +75,7 @@ func (h *header) encodeTo(buf []byte) {
 // decodeHeader parses a 64-byte header.
 func decodeHeader(buf []byte) (*header, error) {
 	if len(buf) < headerSize {
-		return nil, streamerrors.ErrTruncatedFile
+		return nil, sherr.ErrTruncatedFile
 	}
 
 	h := &header{
@@ -87,24 +87,24 @@ func decodeHeader(buf []byte) (*header, error) {
 		PayloadSize:     binary.LittleEndian.Uint32(buf[22:26]),
 		FingerprintSize: buf[26],
 		Seed:            binary.LittleEndian.Uint64(buf[27:35]),
-		BlockAlgorithm:  BlockAlgorithmID(binary.LittleEndian.Uint16(buf[35:37])),
+		BlockAlgorithm:  Algorithm(binary.LittleEndian.Uint16(buf[35:37])),
 	}
 	copy(h.Reserved[:], buf[37:64])
 
 	if h.Magic != magic {
-		return nil, streamerrors.ErrInvalidMagic
+		return nil, sherr.ErrInvalidMagic
 	}
 	if h.Version != version {
-		return nil, streamerrors.ErrInvalidVersion
+		return nil, sherr.ErrInvalidVersion
 	}
 	if h.PayloadSize > uint32(maxPayloadSize) {
-		return nil, streamerrors.ErrCorruptedIndex
+		return nil, sherr.ErrCorruptedIndex
 	}
 	if h.FingerprintSize > uint8(maxFingerprintSize) {
-		return nil, streamerrors.ErrCorruptedIndex
+		return nil, sherr.ErrCorruptedIndex
 	}
 	if h.NumBlocks == 0 && h.TotalKeys > 0 {
-		return nil, streamerrors.ErrCorruptedIndex
+		return nil, sherr.ErrCorruptedIndex
 	}
 
 	return h, nil
@@ -159,7 +159,7 @@ func (f *footer) encodeTo(buf []byte) {
 // decodeFooter parses a 32-byte footer.
 func decodeFooter(buf []byte) (*footer, error) {
 	if len(buf) < footerSize {
-		return nil, streamerrors.ErrTruncatedFile
+		return nil, sherr.ErrTruncatedFile
 	}
 
 	f := &footer{
