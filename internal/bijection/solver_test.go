@@ -9,7 +9,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // Named seeds for deterministic reproduction.
@@ -428,7 +428,7 @@ func TestSolveSplitBucketSeedSearchFailed(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ErrSplitBucketSeedSearchFailed, got nil")
 	}
-	if !errors.Is(err, streamerrors.ErrSplitBucketSeedSearchFailed) {
+	if !errors.Is(err, sherr.ErrSplitBucketSeedSearchFailed) {
 		t.Fatalf("expected ErrSplitBucketSeedSearchFailed, got: %v", err)
 	}
 }

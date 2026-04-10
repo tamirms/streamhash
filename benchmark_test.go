@@ -24,7 +24,7 @@ func benchmarkBuildN(b *testing.B, n int) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		builder, err := NewBuilder(ctx, indexPath, uint64(n))
+		builder, err := NewSortedBuilder(ctx, indexPath, uint64(n))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -65,7 +65,7 @@ func benchmarkQueryN(b *testing.B, n int) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := range b.N {
-		_, _ = idx.Query(keys[i%n])
+		_, _ = idx.QueryRank(keys[i%n])
 	}
 }
 
@@ -91,10 +91,15 @@ func benchmarkQueryPayloadN(b *testing.B, n int) {
 	}
 	defer idx.Close()
 
+	pi, err := idx.WithPayload()
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := range b.N {
-		_, _ = idx.QueryPayload(keys[i%n])
+		_, _, _ = pi.QueryPayload(keys[i%n])
 	}
 }
 
@@ -126,7 +131,7 @@ func BenchmarkQueryParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			_, _ = idx.Query(keys[i%n])
+			_, _ = idx.QueryRank(keys[i%n])
 			i++
 		}
 	})
@@ -198,7 +203,7 @@ func BenchmarkBuildSortedPreHash(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 			for range b.N {
-				builder, err := NewBuilder(ctx, indexPath, uint64(n), WithWorkers(1))
+				builder, err := NewSortedBuilder(ctx, indexPath, uint64(n), WithWorkers(1))
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -230,7 +235,7 @@ func BenchmarkBuildSortedPreHash(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 			for range b.N {
-				builder, err := NewBuilder(ctx, indexPath, uint64(n), WithWorkers(1))
+				builder, err := NewSortedBuilder(ctx, indexPath, uint64(n), WithWorkers(1))
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -292,7 +297,7 @@ func BenchmarkBuilder(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		builder, err := NewBuilder(ctx, indexPath, uint64(numKeys),
+		builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys),
 			WithPayload(payloadSize), WithFingerprint(1))
 		if err != nil {
 			b.Fatal(err)
@@ -345,7 +350,7 @@ func BenchmarkParallelBuilder(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		builder, err := NewBuilder(ctx, indexPath, uint64(numKeys),
+		builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys),
 			WithPayload(payloadSize), WithFingerprint(1), WithWorkers(4))
 		if err != nil {
 			b.Fatal(err)
@@ -386,7 +391,7 @@ func BenchmarkAddKey(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		indexPath := filepath.Join(tmpDir, "test.idx")
-		builder, err := NewBuilder(context.Background(), indexPath, uint64(numKeys),
+		builder, err := NewSortedBuilder(context.Background(), indexPath, uint64(numKeys),
 			WithPayload(4),
 			WithFingerprint(1))
 		if err != nil {
@@ -435,12 +440,12 @@ func BenchmarkPTRHashParallelBuild1M(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := range b.N {
-		builder, err := NewBuilder(ctx, indexPath, uint64(numKeys),
+		builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys),
 			WithAlgorithm(AlgoPTRHash),
 			WithWorkers(numCPU),
 			WithGlobalSeed(uint64(i)))
 		if err != nil {
-			b.Fatalf("NewBuilder failed: %v", err)
+			b.Fatalf("newBuilder failed: %v", err)
 		}
 		for j := range keys {
 			if err := builder.AddKey(keys[j][:], 0); err != nil {
@@ -479,12 +484,12 @@ func BenchmarkPTRHashSingleThread1M(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := range b.N {
-		builder, err := NewBuilder(ctx, indexPath, uint64(numKeys),
+		builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys),
 			WithAlgorithm(AlgoPTRHash),
 			WithWorkers(1),
 			WithGlobalSeed(uint64(i)))
 		if err != nil {
-			b.Fatalf("NewBuilder failed: %v", err)
+			b.Fatalf("newBuilder failed: %v", err)
 		}
 		for j := range keys {
 			if err := builder.AddKey(keys[j][:], 0); err != nil {
@@ -518,7 +523,7 @@ func benchmarkPTRHashQueryN(b *testing.B, n int) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := range b.N {
-		_, _ = idx.Query(keys[i%n])
+		_, _ = idx.QueryRank(keys[i%n])
 	}
 }
 
@@ -542,12 +547,12 @@ func BenchmarkUnsortedBuilder(b *testing.B) {
 	for b.Loop() {
 		output := filepath.Join(tmpDir, "bench.idx")
 
-		builder, err := NewBuilder(ctx, output, uint64(len(keys)),
-			WithUnsortedInput(TempDir(tmpDir)),
+		builder, err := NewUnsortedBuilder(ctx, output, uint64(len(keys)),
+			tmpDir,
 			WithPayload(4),
 		)
 		if err != nil {
-			b.Fatalf("NewBuilder failed: %v", err)
+			b.Fatalf("NewUnsortedBuilder failed: %v", err)
 		}
 
 		for j, key := range keys {
@@ -577,13 +582,13 @@ func BenchmarkUnsortedBuilderParallel(b *testing.B) {
 	for b.Loop() {
 		output := filepath.Join(tmpDir, "bench_parallel.idx")
 
-		builder, err := NewBuilder(ctx, output, uint64(len(keys)),
-			WithUnsortedInput(TempDir(tmpDir)),
+		builder, err := NewUnsortedBuilder(ctx, output, uint64(len(keys)),
+			tmpDir,
 			WithPayload(4),
 			WithWorkers(4),
 		)
 		if err != nil {
-			b.Fatalf("NewBuilder failed: %v", err)
+			b.Fatalf("NewUnsortedBuilder failed: %v", err)
 		}
 
 		for j, key := range keys {

@@ -10,7 +10,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/edsrzf/mmap-go"
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 	intbits "github.com/tamirms/streamhash/internal/bits"
 )
 
@@ -24,7 +24,7 @@ const (
 // Index is a read-only StreamHash index for querying.
 //
 // Thread Safety:
-// - Query, QueryPayload, and other read methods are safe for concurrent use
+// - QueryRank, PayloadIndex.QueryPayload, and other read methods are safe for concurrent use
 // - Close is NOT safe to call concurrently with queries
 // - Close must only be called after all queries have completed
 // - After Close returns, no methods may be called on the Index
@@ -57,12 +57,14 @@ type Index struct {
 
 // Stats holds index statistics.
 type Stats struct {
-	NumKeys      uint64
-	NumBlocks    uint32
-	BitsPerKey   float64
-	PayloadSize  int
-	Fingerprints bool
-	IndexSize    int64
+	NumKeys         uint64
+	NumBlocks       uint32
+	BitsPerKey      float64
+	PayloadSize     int
+	FingerprintSize int       // bytes per key (0 if disabled)
+	FileSize        int64
+	OverheadBPK     float64   // MPHF overhead bits per key (excludes payload + fingerprint)
+	Algorithm       Algorithm
 }
 
 // Open opens a StreamHash index file for querying.
@@ -87,7 +89,7 @@ func OpenFile(f *os.File) (*Index, error) {
 	fileSize := stat.Size()
 
 	if fileSize < int64(minFileSize) {
-		return nil, streamerrors.ErrTruncatedFile
+		return nil, sherr.ErrTruncatedFile
 	}
 
 	mm, err := mmap.Map(f, mmap.RDONLY, 0)
@@ -110,7 +112,7 @@ func OpenFile(f *os.File) (*Index, error) {
 // The caller must ensure data is not modified while the Index is in use.
 func OpenBytes(data []byte) (*Index, error) {
 	if len(data) < minFileSize {
-		return nil, streamerrors.ErrTruncatedFile
+		return nil, sherr.ErrTruncatedFile
 	}
 	idx := &Index{
 		data: data,
@@ -140,24 +142,24 @@ func (idx *Index) initFromData() error {
 
 	// Read userMetadata
 	if offset+4 > fileSize {
-		return streamerrors.ErrTruncatedFile
+		return sherr.ErrTruncatedFile
 	}
 	userMetadataLen := binary.LittleEndian.Uint32(idx.data[offset:])
 	offset += 4
 	if offset+uint64(userMetadataLen) > fileSize {
-		return streamerrors.ErrTruncatedFile
+		return sherr.ErrTruncatedFile
 	}
 	idx.userMetadata = idx.data[offset : offset+uint64(userMetadataLen)]
 	offset += uint64(userMetadataLen)
 
 	// Read algoConfig
 	if offset+4 > fileSize {
-		return streamerrors.ErrTruncatedFile
+		return sherr.ErrTruncatedFile
 	}
 	algoConfigLen := binary.LittleEndian.Uint32(idx.data[offset:])
 	offset += 4
 	if offset+uint64(algoConfigLen) > fileSize {
-		return streamerrors.ErrTruncatedFile
+		return sherr.ErrTruncatedFile
 	}
 	algoConfig := idx.data[offset : offset+uint64(algoConfigLen)]
 	offset += uint64(algoConfigLen)
@@ -170,7 +172,7 @@ func (idx *Index) initFromData() error {
 
 	// fileSize >= minFileSize > footerSize, so no underflow.
 	if ramIndexEnd > fileSize-uint64(footerSize) {
-		return streamerrors.ErrCorruptedIndex
+		return sherr.ErrCorruptedIndex
 	}
 
 	// Load RAM index
@@ -208,17 +210,17 @@ func (idx *Index) Close() error {
 	return nil
 }
 
-// Query returns the rank (0-based index) for a key.
+// QueryRank returns the rank (0-based index) for a key.
 // This is the core MPHF operation.
-// Returns streamerrors.ErrKeyTooShort if key is less than 16 bytes.
-func (idx *Index) Query(key []byte) (uint64, error) {
+// Returns ErrKeyTooShort if key is less than 16 bytes.
+func (idx *Index) QueryRank(key []byte) (uint64, error) {
 	if idx.closed.Load() {
-		return 0, streamerrors.ErrIndexClosed
+		return 0, sherr.ErrIndexClosed
 	}
 
 	// Validate key length (must be at least 16 bytes for routing)
-	if len(key) < minKeySize {
-		return 0, streamerrors.ErrKeyTooShort
+	if len(key) < MinKeySize {
+		return 0, sherr.ErrKeyTooShort
 	}
 
 	return idx.queryInternal(key)
@@ -235,7 +237,7 @@ func (idx *Index) verifyFingerprintSeparated(k0, k1 uint64, globalRank uint64) (
 	payloadOffset := idx.payloadRegionOffset + globalRank*uint64(idx.entrySize)
 
 	if payloadOffset+uint64(fpSize) > uint64(len(idx.data)) {
-		return false, streamerrors.ErrCorruptedIndex
+		return false, sherr.ErrCorruptedIndex
 	}
 
 	storedFP := unpackFingerprintFromBytes(idx.data[payloadOffset:], fpSize)
@@ -256,7 +258,7 @@ func (idx *Index) queryInternal(key []byte) (uint64, error) {
 	blockIdx := intbits.FastRange32(prefix, idx.header.NumBlocks)
 
 	if int(blockIdx) >= len(idx.ramIndex)-1 {
-		return 0, streamerrors.ErrNotFound
+		return 0, sherr.ErrNotFound
 	}
 
 	// Step 2: Get block info from RAM index
@@ -266,7 +268,7 @@ func (idx *Index) queryInternal(key []byte) (uint64, error) {
 	keysInBlock := int(nextEntry.KeysBefore - entry.KeysBefore)
 
 	if keysInBlock == 0 {
-		return 0, streamerrors.ErrNotFound
+		return 0, sherr.ErrNotFound
 	}
 
 	// Step 3: Get metadata for block
@@ -274,7 +276,7 @@ func (idx *Index) queryInternal(key []byte) (uint64, error) {
 	metaEnd := idx.metadataRegionOffset + nextEntry.MetadataOffset
 
 	if metaStart >= metaEnd || metaEnd > uint64(len(idx.data)) {
-		return 0, streamerrors.ErrCorruptedIndex
+		return 0, sherr.ErrCorruptedIndex
 	}
 
 	metadataData := idx.data[metaStart:metaEnd]
@@ -294,48 +296,102 @@ func (idx *Index) queryInternal(key []byte) (uint64, error) {
 			return 0, err
 		}
 		if !ok {
-			return 0, streamerrors.ErrNotFound
+			return 0, sherr.ErrNotFound
 		}
 	}
 
 	return globalRank, nil
 }
 
-// QueryPayload returns the payload for a key as a uint64.
-// Payloads are stored in little-endian format and can be 1-8 bytes.
-// Returns streamerrors.ErrNoPayload if the index has no payload data.
-// Returns streamerrors.ErrKeyTooShort if key is less than 16 bytes.
-func (idx *Index) QueryPayload(key []byte) (uint64, error) {
-	if idx.closed.Load() {
-		return 0, streamerrors.ErrIndexClosed
-	}
+// PayloadIndex extends Index with payload query capability.
+// Obtained via OpenPayload, OpenPayloadFile, OpenPayloadBytes,
+// or Index.WithPayload().
+type PayloadIndex struct {
+	*Index
+}
 
-	if idx.header.PayloadSize == 0 {
-		return 0, streamerrors.ErrNoPayload
-	}
-
-	// Validate key length (must be at least 16 bytes for routing)
-	if len(key) < minKeySize {
-		return 0, streamerrors.ErrKeyTooShort
-	}
-
-	// Get the rank first (includes fingerprint verification if present)
-	rank, err := idx.queryInternal(key)
+// OpenPayload opens a StreamHash index that has payload data.
+// Returns an error if the index was built without WithPayload.
+func OpenPayload(path string) (*PayloadIndex, error) {
+	idx, err := Open(path)
 	if err != nil {
-		return 0, err
+		return nil, err
+	}
+	pi, err := idx.WithPayload()
+	if err != nil {
+		idx.Close()
+		return nil, err
+	}
+	return pi, nil
+}
+
+// OpenPayloadFile opens a payload-capable index from an open file.
+// Returns an error if the index was built without WithPayload.
+func OpenPayloadFile(f *os.File) (*PayloadIndex, error) {
+	idx, err := OpenFile(f)
+	if err != nil {
+		return nil, err
+	}
+	pi, err := idx.WithPayload()
+	if err != nil {
+		idx.Close()
+		return nil, err
+	}
+	return pi, nil
+}
+
+// OpenPayloadBytes creates a payload-capable index from an in-memory byte slice.
+// Returns an error if the index was built without WithPayload.
+func OpenPayloadBytes(data []byte) (*PayloadIndex, error) {
+	idx, err := OpenBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	pi, err := idx.WithPayload()
+	if err != nil {
+		idx.Close()
+		return nil, err
+	}
+	return pi, nil
+}
+
+// WithPayload returns a PayloadIndex if the index has payload data.
+// Returns an error if the index was built without WithPayload.
+func (idx *Index) WithPayload() (*PayloadIndex, error) {
+	if idx.header.PayloadSize == 0 {
+		return nil, sherr.ErrNoPayload
+	}
+	return &PayloadIndex{Index: idx}, nil
+}
+
+// QueryPayload returns the rank and payload for a key.
+// Returns ErrKeyTooShort if key is less than 16 bytes.
+func (pi *PayloadIndex) QueryPayload(key []byte) (rank uint64, payload uint64, err error) {
+	if pi.closed.Load() {
+		return 0, 0, sherr.ErrIndexClosed
+	}
+
+	if len(key) < MinKeySize {
+		return 0, 0, sherr.ErrKeyTooShort
+	}
+
+	rank, err = pi.queryInternal(key)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	// Read payload from payload region
-	fpSize := idx.header.fingerprintSizeInt()
-	payloadSize := idx.header.payloadSizeInt()
+	fpSize := pi.header.fingerprintSizeInt()
+	payloadSize := pi.header.payloadSizeInt()
 
-	payloadOffset := idx.payloadRegionOffset + rank*uint64(idx.entrySize) + uint64(fpSize)
+	payloadOffset := pi.payloadRegionOffset + rank*uint64(pi.entrySize) + uint64(fpSize)
 
-	if payloadOffset+uint64(payloadSize) > uint64(len(idx.data)) {
-		return 0, streamerrors.ErrCorruptedIndex
+	if payloadOffset+uint64(payloadSize) > uint64(len(pi.data)) {
+		return 0, 0, sherr.ErrCorruptedIndex
 	}
 
-	return unpackPayloadFromBytes(idx.data[payloadOffset:], payloadSize), nil
+	payload = unpackPayloadFromBytes(pi.data[payloadOffset:], payloadSize)
+	return rank, payload, nil
 }
 
 // NumKeys returns the total number of keys in the index.
@@ -346,11 +402,6 @@ func (idx *Index) NumKeys() uint64 {
 // NumBlocks returns the number of blocks in the index.
 func (idx *Index) NumBlocks() uint32 {
 	return idx.header.NumBlocks
-}
-
-// HasPayload returns whether the index stores payloads.
-func (idx *Index) HasPayload() bool {
-	return idx.header.hasPayload()
 }
 
 // PayloadSize returns the payload size per key.
@@ -370,8 +421,11 @@ func GetStats(path string) (*Stats, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	return idx.Stats(), idx.Close()
+	stats := idx.Stats()
+	if err := idx.Close(); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 // Stats returns statistics for the index.
@@ -383,13 +437,18 @@ func (idx *Index) Stats() *Stats {
 		bitsPerKey = float64(totalSize*8) / float64(idx.header.TotalKeys)
 	}
 
+	payloadBits := float64(idx.header.payloadSizeInt() * 8)
+	fpBits := float64(idx.header.fingerprintSizeInt() * 8)
+
 	return &Stats{
-		NumKeys:      idx.header.TotalKeys,
-		NumBlocks:    idx.header.NumBlocks,
-		BitsPerKey:   bitsPerKey,
-		PayloadSize:  idx.header.payloadSizeInt(),
-		Fingerprints: idx.header.hasFingerprint(),
-		IndexSize:    totalSize,
+		NumKeys:         idx.header.TotalKeys,
+		NumBlocks:       idx.header.NumBlocks,
+		BitsPerKey:      bitsPerKey,
+		PayloadSize:     idx.header.payloadSizeInt(),
+		FingerprintSize: idx.header.fingerprintSizeInt(),
+		FileSize:        totalSize,
+		OverheadBPK:     bitsPerKey - payloadBits - fpBits,
+		Algorithm:       idx.header.BlockAlgorithm,
 	}
 }
 
@@ -405,7 +464,7 @@ func (idx *Index) Stats() *Stats {
 // where workers compute per-block payload hashes that are folded in order.
 func (idx *Index) Verify() error {
 	if idx.closed.Load() {
-		return streamerrors.ErrIndexClosed
+		return sherr.ErrIndexClosed
 	}
 
 	// Lazy footer decode — only touched by Verify, not Open.
@@ -425,7 +484,7 @@ func (idx *Index) Verify() error {
 		startKey := idx.ramIndex[blockID].KeysBefore
 		endKey := idx.ramIndex[blockID+1].KeysBefore
 		if startKey > endKey {
-			return streamerrors.ErrCorruptedIndex
+			return sherr.ErrCorruptedIndex
 		}
 		numKeys := endKey - startKey
 
@@ -435,7 +494,7 @@ func (idx *Index) Verify() error {
 			payloadStart := idx.payloadRegionOffset + startKey*uint64(idx.entrySize)
 			payloadEnd := idx.payloadRegionOffset + endKey*uint64(idx.entrySize)
 			if payloadEnd > uint64(len(idx.data)) {
-				return streamerrors.ErrCorruptedIndex
+				return sherr.ErrCorruptedIndex
 			}
 			blockPayloads := idx.data[payloadStart:payloadEnd]
 			blockHash = xxhash.Sum64(blockPayloads)
@@ -453,20 +512,20 @@ func (idx *Index) Verify() error {
 	}
 
 	if payloadHasher.Sum64() != ft.PayloadRegionHash {
-		return streamerrors.ErrChecksumFailed
+		return sherr.ErrChecksumFailed
 	}
 
 	// Verify metadata region hash (streaming hash of entire region)
 	footerOffset := fileSize - footerSize
 	if footerOffset < idx.metadataRegionOffset {
-		return streamerrors.ErrCorruptedIndex
+		return sherr.ErrCorruptedIndex
 	}
 	metadataRegionSize := footerOffset - idx.metadataRegionOffset
 	if metadataRegionSize > 0 {
 		metadataRegion := idx.data[idx.metadataRegionOffset:footerOffset]
 		actualMetaHash := xxhash.Sum64(metadataRegion)
 		if actualMetaHash != ft.MetadataRegionHash {
-			return streamerrors.ErrChecksumFailed
+			return sherr.ErrChecksumFailed
 		}
 	}
 

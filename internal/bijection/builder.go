@@ -9,7 +9,7 @@ import (
 	intbits "github.com/tamirms/streamhash/internal/bits"
 	"github.com/tamirms/streamhash/internal/encoding"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // Block metadata format (separated layout with 128-bucket checkpoint stride):
@@ -190,7 +190,7 @@ func (bb *Builder) BuildSeparatedInto(metadataDst, payloadsDst []byte) (int, int
 
 	if bb.keysInBlock > bb.maxKeysPerBlock {
 		return 0, 0, 0, fmt.Errorf("%w: block has %d keys (max %d)",
-			streamerrors.ErrBlockOverflow, bb.keysInBlock, bb.maxKeysPerBlock)
+			sherr.ErrBlockOverflow, bb.keysInBlock, bb.maxKeysPerBlock)
 	}
 
 	// Step 1: Compute bucket sizes and cumulative counts

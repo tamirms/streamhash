@@ -6,7 +6,7 @@ import (
 	"math"
 	"unsafe"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 	"github.com/tamirms/streamhash/internal/encoding"
 )
 
@@ -168,7 +168,7 @@ func (b *Builder) BuildSeparatedInto(metadataDst, payloadsDst []byte) (int, int,
 
 	if b.keysInBlock > b.maxKeysPerBlock {
 		return 0, 0, 0, fmt.Errorf("%w: block has %d keys (max %d)",
-			streamerrors.ErrBlockOverflow, b.keysInBlock, b.maxKeysPerBlock)
+			sherr.ErrBlockOverflow, b.keysInBlock, b.maxKeysPerBlock)
 	}
 
 	// Solve using PTRHash algorithm - pass metadataDst so pilots are written directly
@@ -186,7 +186,7 @@ func (b *Builder) BuildSeparatedInto(metadataDst, payloadsDst []byte) (int, int,
 }
 
 // solve runs the PTRHash solver on this block.
-// metadataDst is the mmap destination - pilots are written directly there (zero-copy).
+// metadataDst is the destination buffer - pilots are written directly there (zero-copy).
 // Retries with different random seeds if eviction limit is hit (rare, <1 in 100K blocks).
 func (b *Builder) solve(metadataDst []byte) error {
 	var err error
@@ -209,7 +209,7 @@ func (b *Builder) solve(metadataDst []byte) error {
 
 // encodeMetadataInto encodes PTRHash block metadata.
 // Format: [Pilots (8-bit direct)][RemapTable]
-// Note: Pilots are already written directly by the solver (zero-copy to mmap).
+// Note: Pilots are already written directly by the solver (zero-copy to destination).
 // This function only needs to encode the remap table after the pilots.
 func (b *Builder) encodeMetadataInto(dst []byte) int {
 	// Pilots already written directly by solver - just skip past them

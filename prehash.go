@@ -36,7 +36,7 @@ import (
 //	})
 //
 //	// 3. Build using Builder
-//	builder, _ := streamhash.NewBuilder(ctx, path, uint64(len(hashedKeys)))
+//	builder, _ := streamhash.NewSortedBuilder(ctx, path, uint64(len(hashedKeys)))
 //	for _, hk := range hashedKeys {
 //	    builder.AddKey(hk, 0)
 //	}
@@ -56,7 +56,7 @@ import (
 //
 // Querying: If you prehash keys during build, you must also prehash during query:
 //
-//	rank, err := idx.Query(streamhash.PreHash(originalKey))
+//	rank, err := idx.QueryRank(streamhash.PreHash(originalKey))
 func PreHash(key []byte) []byte {
 	h := xxh3.Hash128(key)
 	result := make([]byte, 16)
@@ -68,7 +68,7 @@ func PreHash(key []byte) []byte {
 // PreHashInPlace applies xxHash3-128 to a key, writing the result to dst.
 // dst must be at least 16 bytes. This avoids allocation when processing
 // many keys in a loop.
-func PreHashInPlace(key []byte, dst []byte) {
+func PreHashInPlace(dst []byte, key []byte) {
 	h := xxh3.Hash128(key)
 	binary.LittleEndian.PutUint64(dst[0:8], h.Lo)
 	binary.LittleEndian.PutUint64(dst[8:16], h.Hi)

@@ -6,7 +6,7 @@ import (
 	"math/rand/v2"
 	"slices"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // errEvictionLimitExceeded is returned when the PTRHash solver exceeds the
@@ -227,7 +227,7 @@ func (s *solver) solve() ([]uint8, []uint16, error) {
 }
 
 // processBucketWithHeap processes a single bucket using Phase 1 (fast path) or Phase 2 (eviction).
-// Returns streamerrors.ErrIndistinguishableHashes if no valid pilot can be found.
+// Returns sherr.ErrIndistinguishableHashes if no valid pilot can be found.
 func (s *solver) processBucketWithHeap(bucketIdx int, rng *rand.Rand, bestSlots *[]uint16, evictedOwners *[]uint16, pendingHeap *bucketHeap) error {
 	bucketSize := s.bucketSize(bucketIdx)
 	bucket := s.bucketKeys(bucketIdx)
@@ -312,7 +312,7 @@ func (s *solver) processBucketWithHeap(bucketIdx int, rng *rand.Rand, bestSlots 
 		// Duplicate keys produce identical slots for all pilots, so the solver
 		// is mathematically guaranteed to reach this error path.
 		if hasDuplicateSlotInput(bucket) {
-			return streamerrors.ErrDuplicateKey
+			return sherr.ErrDuplicateKey
 		}
 		// Find bucket size distribution for debugging
 		maxSize := 0
@@ -322,7 +322,7 @@ func (s *solver) processBucketWithHeap(bucketIdx int, rng *rand.Rand, bestSlots 
 			}
 		}
 		return fmt.Errorf("%w: bucket=%d size=%d maxBucketSize=%d numSlots=%d",
-			streamerrors.ErrIndistinguishableHashes, bucketIdx, bucketSize, maxSize, s.numSlots)
+			sherr.ErrIndistinguishableHashes, bucketIdx, bucketSize, maxSize, s.numSlots)
 	}
 
 	// Evict conflicting buckets
@@ -493,7 +493,7 @@ func newSolver(maxNumBuckets int, maxNumKeys int) *solver {
 
 // reset prepares the solver for a new block.
 // Stores reference to buckets directly (no copy) - aligned with bijection solver.
-// If pilotsDst is provided, pilots are written directly there (zero-copy to mmap).
+// If pilotsDst is provided, pilots are written directly there (zero-copy to destination buffer).
 // If pilotsDst is nil, uses internal pilots buffer.
 func (s *solver) reset(buckets [][]bucketEntry, numKeys int, globalSeed uint64, pilotsDst []byte) {
 	numBuckets := uint32(len(buckets))
@@ -589,7 +589,7 @@ func (s *solver) reset(buckets [][]bucketEntry, numKeys int, globalSeed uint64, 
 	}
 
 	// Note: Pilots are written during solve(). Empty buckets explicitly get pilot=0.
-	// No bulk zeroing needed - saves expensive mmap writes.
+	// No bulk zeroing needed - saves expensive buffer writes.
 
 	// Reset pinned buffer (fixed size 16)
 	for i := range s.pinned {

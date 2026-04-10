@@ -1,9 +1,6 @@
-// Package errors defines all exported error sentinels for the streamhash library.
-//
-// This is the single source of truth for error values. Both the top-level
-// streamhash package and internal algorithm packages import from here,
-// ensuring errors.Is checks work across package boundaries.
-package errors
+// Package sherr defines error sentinels shared across the streamhash library.
+// User-facing sentinels are re-exported by the root streamhash package.
+package sherr
 
 import "errors"
 
@@ -20,7 +17,7 @@ var (
 	ErrKeyCountMismatch = errors.New("streamhash: key count mismatch")
 )
 
-// Construction errors (spec §7.2.5)
+// Construction errors
 var (
 	ErrPayloadTooLarge             = errors.New("streamhash: PayloadSize exceeds maximum 8 bytes")
 	ErrFingerprintTooLarge         = errors.New("streamhash: FingerprintSize exceeds maximum (4 bytes)")
@@ -44,7 +41,7 @@ var (
 	ErrNotFound    = errors.New("streamhash: key not found")
 )
 
-// Internal errors (used by algorithm implementations)
+// Internal errors (used by algorithm implementations, not re-exported)
 var (
 	ErrInvalidGeometry = errors.New("streamhash: invalid geometry parameters")
 	ErrBlockOverflow   = errors.New("streamhash: block overflow")

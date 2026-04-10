@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 )
 
-// minKeySize is the minimum key length required for routing and hash computation.
+// MinKeySize is the minimum key length required for routing and hash computation.
 // Keys must have at least 16 bytes to extract k0 (bytes 0-7) and k1 (bytes 8-15).
-const minKeySize = 16
+const MinKeySize = 16
 
 // unpackFingerprintFromBytes unpacks fingerprint bytes into a uint32.
 // Optimized for common fingerprint sizes (0, 1, 2, 4 bytes).

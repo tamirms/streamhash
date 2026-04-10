@@ -11,7 +11,7 @@ import (
 	"slices"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 	intbits "github.com/tamirms/streamhash/internal/bits"
 )
 
@@ -76,7 +76,7 @@ func payloadToUint64(payload []byte) uint64 {
 }
 
 // numBlocksForAlgo returns the number of blocks for the given algorithm and key count.
-func numBlocksForAlgo(algo BlockAlgorithmID, n uint64, payloadSize, fingerprintSize int) (uint32, error) {
+func numBlocksForAlgo(algo Algorithm, n uint64, payloadSize, fingerprintSize int) (uint32, error) {
 	bldr, err := newBlockBuilder(algo, n, 0, payloadSize, fingerprintSize)
 	if err != nil {
 		return 0, err
@@ -139,11 +139,12 @@ func sortEntriesByBlock(entries []entry, opts []BuildOption) {
 	})
 }
 
+
 // buildFromSlice builds an index from a slice of entries.
 // Entries are sorted by block index before building.
 func buildFromSlice(ctx context.Context, output string, entries []entry, opts ...BuildOption) error {
 	if len(entries) == 0 {
-		return streamerrors.ErrEmptyIndex
+		return sherr.ErrEmptyIndex
 	}
 
 	cfg := defaultBuildConfig()
@@ -161,7 +162,7 @@ func buildFromSlice(ctx context.Context, output string, entries []entry, opts ..
 			blockIndexFromPrefix(extractPrefix(b.Key), numBlocks))
 	})
 
-	builder, err := NewBuilder(ctx, output, uint64(len(entries)), opts...)
+	builder, err := NewSortedBuilder(ctx, output, uint64(len(entries)), opts...)
 	if err != nil {
 		return err
 	}
@@ -179,10 +180,10 @@ func buildFromSlice(ctx context.Context, output string, entries []entry, opts ..
 // buildSorted builds an index from a key iterator with []byte payloads.
 func buildSorted(ctx context.Context, output string, totalKeys uint64, keys func(yield func([]byte, []byte) bool), opts ...BuildOption) error {
 	if totalKeys == 0 {
-		return streamerrors.ErrEmptyIndex
+		return sherr.ErrEmptyIndex
 	}
 
-	builder, err := NewBuilder(ctx, output, totalKeys, opts...)
+	builder, err := NewSortedBuilder(ctx, output, totalKeys, opts...)
 	if err != nil {
 		return err
 	}
@@ -200,14 +201,14 @@ func buildSorted(ctx context.Context, output string, totalKeys uint64, keys func
 // buildFromEntries builds an index from entries, sorting them first.
 func buildFromEntries(ctx context.Context, output string, entries []entry, opts ...BuildOption) error {
 	if len(entries) == 0 {
-		return streamerrors.ErrEmptyIndex
+		return sherr.ErrEmptyIndex
 	}
 
 	sorted := make([]entry, len(entries))
 	copy(sorted, entries)
 	sortEntriesByBlock(sorted, opts)
 
-	builder, err := NewBuilder(ctx, output, uint64(len(sorted)), opts...)
+	builder, err := NewSortedBuilder(ctx, output, uint64(len(sorted)), opts...)
 	if err != nil {
 		return err
 	}
@@ -226,7 +227,7 @@ func buildFromEntries(ctx context.Context, output string, entries []entry, opts 
 // It copies the input slice to avoid mutating the caller's data.
 func quickBuild(ctx context.Context, output string, keys [][]byte, opts ...BuildOption) error {
 	if len(keys) == 0 {
-		return streamerrors.ErrEmptyIndex
+		return sherr.ErrEmptyIndex
 	}
 
 	sorted := make([][]byte, len(keys))
@@ -235,7 +236,7 @@ func quickBuild(ctx context.Context, output string, keys [][]byte, opts ...Build
 
 	sortKeysByBlock(keys, uint64(len(keys)), opts)
 
-	builder, err := NewBuilder(ctx, output, uint64(len(keys)), opts...)
+	builder, err := NewSortedBuilder(ctx, output, uint64(len(keys)), opts...)
 	if err != nil {
 		return err
 	}
@@ -270,12 +271,12 @@ func buildUnsortedFromIter(ctx context.Context, output string, iter func(yield f
 	})
 
 	if len(entries) == 0 {
-		return streamerrors.ErrEmptyIndex
+		return sherr.ErrEmptyIndex
 	}
 
 	sortEntriesByBlock(entries, opts)
 
-	builder, err := NewBuilder(ctx, output, uint64(len(entries)), opts...)
+	builder, err := NewSortedBuilder(ctx, output, uint64(len(entries)), opts...)
 	if err != nil {
 		return err
 	}
@@ -301,14 +302,14 @@ func buildParallelBytes(ctx context.Context, output string, iter func(yield func
 	})
 
 	if len(entries) == 0 {
-		return streamerrors.ErrEmptyIndex
+		return sherr.ErrEmptyIndex
 	}
 
 	sortEntriesByBlock(entries, opts)
 
 	opts = append(opts, WithWorkers(4))
 
-	builder, err := NewBuilder(ctx, output, uint64(len(entries)), opts...)
+	builder, err := NewSortedBuilder(ctx, output, uint64(len(entries)), opts...)
 	if err != nil {
 		return err
 	}
@@ -341,7 +342,7 @@ func createSmallValidIndex(path string) error {
 
 	sortKeysByBlock(keys, uint64(numKeys), nil)
 
-	builder, err := NewBuilder(ctx, path, uint64(numKeys))
+	builder, err := NewSortedBuilder(ctx, path, uint64(numKeys))
 	if err != nil {
 		return err
 	}
@@ -356,19 +357,17 @@ func createSmallValidIndex(path string) error {
 	return builder.Finish()
 }
 
-// buildAndOpen builds an index from the given keys/entries and opens it for querying.
-// The caller must call idx.Close() when done.
+// buildAndOpen builds a sorted index from the given keys and opens it for querying.
+// Keys must already be sorted by block index. The caller must call idx.Close() when done.
 func buildAndOpen(t *testing.T, keys [][]byte, payloads []uint64, opts ...BuildOption) *Index {
 	t.Helper()
-	tempDir := t.TempDir()
-	indexPath := filepath.Join(tempDir, "test.idx")
-
+	indexPath := filepath.Join(t.TempDir(), "test.idx")
 	ctx := context.Background()
 	n := uint64(len(keys))
 
-	builder, err := NewBuilder(ctx, indexPath, n, opts...)
+	builder, err := NewSortedBuilder(ctx, indexPath, n, opts...)
 	if err != nil {
-		t.Fatalf("NewBuilder error: %v", err)
+		t.Fatalf("NewSortedBuilder: %v", err)
 	}
 
 	for i, key := range keys {
@@ -390,7 +389,41 @@ func buildAndOpen(t *testing.T, keys [][]byte, payloads []uint64, opts ...BuildO
 	if err != nil {
 		t.Fatalf("Open error: %v", err)
 	}
+	return idx
+}
 
+// buildAndOpenUnsorted builds an unsorted index from the given keys and opens it for querying.
+// Keys can be in any order. The caller must call idx.Close() when done.
+func buildAndOpenUnsorted(t *testing.T, keys [][]byte, payloads []uint64, tempDir string, opts ...BuildOption) *Index {
+	t.Helper()
+	indexPath := filepath.Join(t.TempDir(), "test.idx")
+	ctx := context.Background()
+	n := uint64(len(keys))
+
+	builder, err := NewUnsortedBuilder(ctx, indexPath, n, tempDir, opts...)
+	if err != nil {
+		t.Fatalf("NewUnsortedBuilder: %v", err)
+	}
+
+	for i, key := range keys {
+		var payload uint64
+		if payloads != nil {
+			payload = payloads[i]
+		}
+		if err := builder.AddKey(key, payload); err != nil {
+			builder.Close()
+			t.Fatalf("AddKey error at %d: %v", i, err)
+		}
+	}
+
+	if err := builder.Finish(); err != nil {
+		t.Fatalf("Finish error: %v", err)
+	}
+
+	idx, err := Open(indexPath)
+	if err != nil {
+		t.Fatalf("Open error: %v", err)
+	}
 	return idx
 }
 
@@ -401,7 +434,7 @@ func verifyMPHF(t *testing.T, idx *Index, keys [][]byte) {
 	ranks := make(map[uint64]bool, len(keys))
 
 	for i, key := range keys {
-		rank, err := idx.Query(key)
+		rank, err := idx.QueryRank(key)
 		if err != nil {
 			t.Errorf("Query error for key %d: %v", i, err)
 			continue
@@ -423,13 +456,18 @@ func verifyMPHF(t *testing.T, idx *Index, keys [][]byte) {
 // verifyPayloads checks payload round-trip for all keys.
 func verifyPayloads(t *testing.T, idx *Index, keys [][]byte, payloads []uint64, payloadSize int) {
 	t.Helper()
+	pi, err := idx.WithPayload()
+	if err != nil {
+		t.Fatalf("WithPayload: %v", err)
+	}
+
 	mask := uint64(0)
 	for i := 0; i < payloadSize && i < 8; i++ {
 		mask |= 0xFF << (i * 8)
 	}
 
 	for i, key := range keys {
-		got, err := idx.QueryPayload(key)
+		_, got, err := pi.QueryPayload(key)
 		if err != nil {
 			t.Errorf("QueryPayload error for key %d: %v", i, err)
 			continue
@@ -451,7 +489,7 @@ func verifyNonMemberRejection(t *testing.T, rng *rand.Rand, idx *Index, numProbe
 		binary.BigEndian.PutUint64(nonMember[0:8], uint64(0xDEAD000000000000)|uint64(i))
 		fillFromRNG(rng, nonMember[8:])
 
-		_, err := idx.Query(nonMember)
+		_, err := idx.QueryRank(nonMember)
 		if err != nil {
 			rejected++
 		}

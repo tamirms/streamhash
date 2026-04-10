@@ -2,7 +2,6 @@ package streamhash
 
 import (
 	"context"
-	"encoding/binary"
 	"path/filepath"
 	"runtime"
 	"runtime/metrics"
@@ -11,14 +10,13 @@ import (
 	"time"
 )
 
-// TestMemoryBudgetAccuracy verifies that unsorted builds respect the memory
-// budget by sampling peak heap across both write (AddKey/flush) and read-back
-// (Finish) phases. Uses runtime/metrics with a 10ms ticker to avoid the
-// stop-the-world pause of runtime.ReadMemStats. Catches regressions if a
-// future change adds allocations that break the budget.
-func TestMemoryBudgetAccuracy(t *testing.T) {
+// TestUnsortedHeapBound verifies that unsorted builds stay within expected
+// heap limits by sampling peak heap across both write (AddKey/flush) and
+// read-back (Finish) phases. Uses runtime/metrics with a 10ms ticker to
+// avoid the stop-the-world pause of runtime.ReadMemStats.
+func TestUnsortedHeapBound(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping memory budget test in short mode")
+		t.Skip("skipping heap bound test in short mode")
 	}
 
 	configs := []struct {
@@ -27,18 +25,17 @@ func TestMemoryBudgetAccuracy(t *testing.T) {
 		payload   int
 		fp        int
 		keySize   int
-		budgetMB  int64
-		maxHeapMB int64 // budget × 2.5 (accounts for GC doubling + overhead)
+		maxHeapMB int64 // absolute cap on heap above baseline
 	}{
-		// numKeys must exceed bufferCap (= budget/4/32) to force partition
-		// flush + readback (non-fast path). Otherwise the test only exercises
-		// the in-memory fast path and misses readPartition memory usage.
-		//
-		// 64MB budget → bufferCap = 524,288 → need > 524K keys
-		// 256MB budget → bufferCap = 2,097,152 → need > 2.1M keys
-		{"64MB_p4_fp1", 1_000_000, 4, 1, 20, 64, 160},
-		{"256MB_p0_fp0", 5_000_000, 0, 0, 16, 256, 640},
-		{"64MB_p8_fp4", 1_000_000, 8, 4, 24, 64, 160},
+		// numKeys must exceed bufferCap (≈ 524K) to force partition flush
+		// to force partition flush + readback (non-fast path).
+		// Heap budget covers both the fast path (all entries in memory, no flush)
+		// and the normal path (partition buffers + readback). The fast path has
+		// higher peak heap because partition regions + collected entries overlap
+		// before GC can reclaim the regions.
+		{"1M_p4_fp1", 1_000_000, 4, 1, 20, 320},
+		{"5M_p0_fp0", 5_000_000, 0, 0, 16, 320},
+		{"1M_p8_fp4", 1_000_000, 8, 4, 24, 320},
 	}
 
 	for _, tc := range configs {
@@ -57,7 +54,6 @@ func TestMemoryBudgetAccuracy(t *testing.T) {
 			}
 
 			opts := []BuildOption{
-				WithUnsortedInput(TempDir(tmpDir)),
 				WithWorkers(1),
 			}
 			if tc.payload > 0 {
@@ -68,9 +64,9 @@ func TestMemoryBudgetAccuracy(t *testing.T) {
 			}
 
 			indexPath := filepath.Join(tmpDir, "budget_test.idx")
-			builder, err := NewBuilder(ctx, indexPath, uint64(tc.numKeys), opts...)
+			builder, err := NewUnsortedBuilder(ctx, indexPath, uint64(tc.numKeys), tmpDir, opts...)
 			if err != nil {
-				t.Fatalf("NewBuilder: %v", err)
+				t.Fatalf("newBuilder: %v", err)
 			}
 
 			// Establish baseline heap after GC
@@ -135,12 +131,12 @@ func TestMemoryBudgetAccuracy(t *testing.T) {
 				}
 			}
 
-			// Check peak heap against budget × 2.5
+			// Check peak heap against limit
 			peakAboveBaseline := int64(peakHeap.Load()) - int64(baselineHeap)
 			peakMB := peakAboveBaseline >> 20
 			if peakMB > tc.maxHeapMB {
-				t.Errorf("peak heap %dMB exceeds limit %dMB (budget %dMB × 2.5)",
-					peakMB, tc.maxHeapMB, tc.budgetMB)
+				t.Errorf("peak heap %dMB exceeds limit %dMB",
+					peakMB, tc.maxHeapMB)
 			}
 			t.Logf("peak heap above baseline: %dMB (limit %dMB)", peakMB, tc.maxHeapMB)
 
@@ -153,9 +149,7 @@ func TestMemoryBudgetAccuracy(t *testing.T) {
 
 			// Spot-check a few keys
 			for i := 0; i < min(100, tc.numKeys); i++ {
-				k0 := binary.LittleEndian.Uint64(keys[i][0:8])
-				_ = k0
-				_, err := idx.Query(keys[i])
+				_, err := idx.QueryRank(keys[i])
 				if err != nil {
 					t.Fatalf("Query key %d: %v", i, err)
 				}

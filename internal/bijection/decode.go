@@ -8,7 +8,7 @@ import (
 
 	intbits "github.com/tamirms/streamhash/internal/bits"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // Decoder handles query-time slot computation for the bijection algorithm.
@@ -21,7 +21,7 @@ type Decoder struct {
 // Returns an error if globalConfig is unexpectedly non-empty.
 func NewDecoder(globalConfig []byte, globalSeed uint64) (*Decoder, error) {
 	if len(globalConfig) != 0 {
-		return nil, fmt.Errorf("%w: bijection: unexpected non-empty global config (len=%d)", streamerrors.ErrCorruptedIndex, len(globalConfig))
+		return nil, fmt.Errorf("%w: bijection: unexpected non-empty global config (len=%d)", sherr.ErrCorruptedIndex, len(globalConfig))
 	}
 	return &Decoder{
 		globalSeed: globalSeed,
@@ -34,11 +34,11 @@ func NewDecoder(globalConfig []byte, globalSeed uint64) (*Decoder, error) {
 // keysInBlock is the number of keys in this block.
 func (d *Decoder) QuerySlot(k0, k1 uint64, metadata []byte, keysInBlock int) (int, error) {
 	if keysInBlock == 0 {
-		return 0, streamerrors.ErrNotFound
+		return 0, sherr.ErrNotFound
 	}
 
 	if len(metadata) < checkpointsSize {
-		return 0, streamerrors.ErrCorruptedIndex
+		return 0, sherr.ErrCorruptedIndex
 	}
 
 	// Step 1: Decode checkpoints
@@ -56,7 +56,7 @@ func (d *Decoder) QuerySlot(k0, k1 uint64, metadata []byte, keysInBlock int) (in
 
 	// Step 4: EF data starts after checkpoints
 	if checkpointsSize >= len(metadata) {
-		return 0, streamerrors.ErrCorruptedIndex
+		return 0, sherr.ErrCorruptedIndex
 	}
 	efData := metadata[checkpointsSize:]
 
@@ -105,7 +105,7 @@ func (d *Decoder) QuerySlot(k0, k1 uint64, metadata []byte, keysInBlock int) (in
 	bucketSize := int(bucketEnd - bucketStart)
 
 	if bucketSize == 0 {
-		return 0, streamerrors.ErrNotFound
+		return 0, sherr.ErrNotFound
 	}
 
 	// Step 9: Get seed bit position from coarse checkpoint (128-bucket intervals)
@@ -118,7 +118,7 @@ func (d *Decoder) QuerySlot(k0, k1 uint64, metadata []byte, keysInBlock int) (in
 	efSize := eliasFanoSize(bucketsPerBlock, keysInBlock)
 	seedStreamOffset := checkpointsSize + efSize
 	if seedStreamOffset >= len(metadata) {
-		return 0, streamerrors.ErrCorruptedIndex
+		return 0, sherr.ErrCorruptedIndex
 	}
 
 	// Step 11: Skip to segment start in seed stream using checkpoint

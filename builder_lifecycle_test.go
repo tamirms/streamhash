@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // ============================================================================
@@ -24,7 +24,7 @@ import (
 func TestBuildModeEquivalence(t *testing.T) {
 	algorithms := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
@@ -98,7 +98,7 @@ func TestBuildModeEquivalence(t *testing.T) {
 				// Build sorted
 				sortedPath := filepath.Join(tmpDir, "sorted.idx")
 				sortedOpts := append([]BuildOption{WithWorkers(1)}, opts...)
-				builderS, err := NewBuilder(ctx, sortedPath, uint64(numKeys), sortedOpts...)
+				builderS, err := NewSortedBuilder(ctx, sortedPath, uint64(numKeys), sortedOpts...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -115,7 +115,7 @@ func TestBuildModeEquivalence(t *testing.T) {
 				// Build parallel
 				parallelPath := filepath.Join(tmpDir, "parallel.idx")
 				parallelOpts := append([]BuildOption{WithWorkers(4)}, opts...)
-				builderP, err := NewBuilder(ctx, parallelPath, uint64(numKeys), parallelOpts...)
+				builderP, err := NewSortedBuilder(ctx, parallelPath, uint64(numKeys), parallelOpts...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -131,8 +131,8 @@ func TestBuildModeEquivalence(t *testing.T) {
 
 				// Build unsorted (single-threaded)
 				unsortedPath := filepath.Join(tmpDir, "unsorted.idx")
-				unsortedOpts := append([]BuildOption{WithUnsortedInput(TempDir(tmpDir)), WithWorkers(1)}, opts...)
-				builderU, err := NewBuilder(ctx, unsortedPath, uint64(numKeys), unsortedOpts...)
+				unsortedOpts := append([]BuildOption{WithWorkers(1)}, opts...)
+				builderU, err := NewUnsortedBuilder(ctx, unsortedPath, uint64(numKeys), tmpDir, unsortedOpts...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -148,8 +148,8 @@ func TestBuildModeEquivalence(t *testing.T) {
 
 				// Build unsorted (parallel)
 				unsortedParPath := filepath.Join(tmpDir, "unsorted_par.idx")
-				unsortedParOpts := append([]BuildOption{WithUnsortedInput(TempDir(tmpDir)), WithWorkers(4)}, opts...)
-				builderUP, err := NewBuilder(ctx, unsortedParPath, uint64(numKeys), unsortedParOpts...)
+				unsortedParOpts := append([]BuildOption{WithWorkers(4)}, opts...)
+				builderUP, err := NewUnsortedBuilder(ctx, unsortedParPath, uint64(numKeys), tmpDir, unsortedParOpts...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -210,7 +210,7 @@ func TestBuildModeEquivalence(t *testing.T) {
 						}
 						ranks := make(map[uint64]bool)
 						for _, key := range keys {
-							rank, err := idx.Query(key)
+							rank, err := idx.QueryRank(key)
 							if err != nil {
 								t.Fatalf("Query %s: %v", tc.name, err)
 							}
@@ -221,8 +221,12 @@ func TestBuildModeEquivalence(t *testing.T) {
 						}
 						// Verify payloads round-trip correctly
 						if cfg.payload > 0 {
+							pi, piErr := idx.WithPayload()
+							if piErr != nil {
+								t.Fatalf("WithPayload %s: %v", tc.name, piErr)
+							}
 							for ki, key := range keys {
-								got, err := idx.QueryPayload(key)
+								_, got, err := pi.QueryPayload(key)
 								if err != nil {
 									t.Fatalf("QueryPayload %s key %d: %v", tc.name, ki, err)
 								}
@@ -247,7 +251,7 @@ func TestBuildModeEquivalence(t *testing.T) {
 func TestGlobalSeedAffectsIndex(t *testing.T) {
 	algorithms := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
@@ -268,10 +272,6 @@ func TestGlobalSeedAffectsIndex(t *testing.T) {
 				var opts1, opts2 []BuildOption
 				opts1 = append(opts1, WithAlgorithm(algoCase.algo), WithGlobalSeed(0x1111111111111111))
 				opts2 = append(opts2, WithAlgorithm(algoCase.algo), WithGlobalSeed(0x2222222222222222))
-				if unsorted {
-					opts1 = append(opts1, WithUnsortedInput())
-					opts2 = append(opts2, WithUnsortedInput())
-				}
 
 				ctx := context.Background()
 				path1 := filepath.Join(tmpDir, "seed1.idx")
@@ -299,8 +299,8 @@ func TestGlobalSeedAffectsIndex(t *testing.T) {
 				differentCount := 0
 				queryErrors := 0
 				for _, key := range keys {
-					r1, e1 := idx1.Query(key)
-					r2, e2 := idx2.Query(key)
+					r1, e1 := idx1.QueryRank(key)
+					r2, e2 := idx2.QueryRank(key)
 					if e1 != nil || e2 != nil {
 						queryErrors++
 						continue
@@ -334,7 +334,7 @@ func TestUserMetadataRoundtrip(t *testing.T) {
 	}
 	slices.SortFunc(keys, bytes.Compare)
 
-	idx := buildAndOpen(t, keys, nil, WithUserMetadata(metadata))
+	idx := buildAndOpen(t, keys, nil, WithMetadata(metadata))
 	defer idx.Close()
 
 	storedMetadata := idx.UserMetadata()
@@ -359,9 +359,9 @@ func TestParallelBuilderContextTimeoutPrecision(t *testing.T) {
 	keys := generateRandomKeys(rng, numKeys, 16)
 	sortKeysByBlock(keys, uint64(numKeys), nil)
 
-	builder, err := NewBuilder(ctx, indexPath, uint64(numKeys), WithWorkers(4))
+	builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys), WithWorkers(4))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 
 	var addErr error
@@ -398,9 +398,9 @@ func TestParallelBuilderCloseUnderLoad(t *testing.T) {
 	keys := generateRandomKeys(rng, numKeys, 16)
 	sortKeysByBlock(keys, uint64(numKeys), nil)
 
-	builder, err := NewBuilder(ctx, indexPath, uint64(numKeys), WithWorkers(4))
+	builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys), WithWorkers(4))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 
 	// Add partial keys
@@ -430,9 +430,9 @@ func TestParallelBuilderClose(t *testing.T) {
 	keys := generateRandomKeys(rng, numKeys, 16)
 	sortKeysByBlock(keys, uint64(numKeys), nil)
 
-	builder, err := NewBuilder(context.Background(), output, uint64(numKeys), WithWorkers(4))
+	builder, err := NewSortedBuilder(context.Background(), output, uint64(numKeys), WithWorkers(4))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 
 	for i := range 500 {
@@ -459,7 +459,7 @@ func TestParallelBuilderStress(t *testing.T) {
 
 	algorithms := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
@@ -476,10 +476,10 @@ func TestParallelBuilderStress(t *testing.T) {
 				keys := generateRandomKeys(rng, numKeys, 16)
 				sortKeysByBlock(keys, uint64(numKeys), []BuildOption{WithAlgorithm(alg.algo)})
 
-				builder, err := NewBuilder(context.Background(), indexPath, uint64(numKeys),
+				builder, err := NewSortedBuilder(context.Background(), indexPath, uint64(numKeys),
 					WithWorkers(4), WithAlgorithm(alg.algo))
 				if err != nil {
-					t.Fatalf("Cycle %d: NewBuilder failed: %v", cycle, err)
+					t.Fatalf("Cycle %d: newBuilder failed: %v", cycle, err)
 				}
 				for _, key := range keys {
 					if err := builder.AddKey(key, 0); err != nil {
@@ -529,9 +529,9 @@ func TestParallelBuilderConcurrentBuilds(t *testing.T) {
 			numKeys := len(keys)
 			sortKeysByBlock(keys, uint64(numKeys), nil)
 
-			builder, err := NewBuilder(context.Background(), indexPath, uint64(numKeys), WithWorkers(2))
+			builder, err := NewSortedBuilder(context.Background(), indexPath, uint64(numKeys), WithWorkers(2))
 			if err != nil {
-				errCh <- fmt.Errorf("builder %d: NewBuilder: %w", builderID, err)
+				errCh <- fmt.Errorf("builder %d: newBuilder: %w", builderID, err)
 				return
 			}
 			for _, key := range keys {
@@ -580,7 +580,7 @@ func TestBuilderCloseIdempotent(t *testing.T) {
 	keys := generateRandomKeys(rng, numKeys, 16)
 	sortKeysByBlock(keys, uint64(numKeys), nil)
 
-	builder, err := NewBuilder(context.Background(), indexPath, uint64(numKeys))
+	builder, err := NewSortedBuilder(context.Background(), indexPath, uint64(numKeys))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,8 +617,8 @@ func TestUnsortedReplayCloseAfterFailedFinish(t *testing.T) {
 	numKeys := 50000
 	ctx, cancel := context.WithCancel(context.Background())
 
-	builder, err := NewBuilder(ctx, output, uint64(numKeys),
-		WithUnsortedInput(TempDir(tmpDir)), WithPayload(4))
+	builder, err := NewUnsortedBuilder(ctx, output, uint64(numKeys),
+		tmpDir, WithPayload(4))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestBuilderRejectsOutOfOrderKeys(t *testing.T) {
 		t.Fatal("test setup bug: all keys in same block despite numBlocks >= 2")
 	}
 
-	builder, err := NewBuilder(context.Background(), indexPath, uint64(numKeys))
+	builder, err := NewSortedBuilder(context.Background(), indexPath, uint64(numKeys))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,7 +705,7 @@ func TestBuilderRejectsOutOfOrderKeys(t *testing.T) {
 
 	if addErr == nil {
 		t.Error("expected error for out-of-order keys")
-	} else if !errors.Is(addErr, streamerrors.ErrUnsortedInput) {
+	} else if !errors.Is(addErr, sherr.ErrUnsortedInput) {
 		t.Errorf("expected ErrUnsortedInput, got: %v", addErr)
 	}
 }

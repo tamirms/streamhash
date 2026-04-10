@@ -3,25 +3,25 @@ package streamhash
 import (
 	"fmt"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 	"github.com/tamirms/streamhash/internal/bijection"
 	"github.com/tamirms/streamhash/internal/ptrhash"
 )
 
-// BlockAlgorithmID identifies the MPHF algorithm used for block construction.
+// Algorithm identifies the MPHF algorithm used for block construction.
 // This is stored in the file header.
-type BlockAlgorithmID uint16
+type Algorithm uint16
 
 const (
 	// AlgoBijection uses EF/GR encoding with O(128) query.
-	AlgoBijection BlockAlgorithmID = 0
+	AlgoBijection Algorithm = 0
 
 	// AlgoPTRHash uses PTRHash-style Cuckoo with 8-bit pilots.
-	AlgoPTRHash BlockAlgorithmID = 1
+	AlgoPTRHash Algorithm = 1
 )
 
 // String returns the algorithm name.
-func (a BlockAlgorithmID) String() string {
+func (a Algorithm) String() string {
 	switch a {
 	case AlgoBijection:
 		return "bijection"
@@ -184,7 +184,7 @@ type blockDecoder interface {
 //   - fingerprintSize: bytes per fingerprint (0-4), 0 to disable verification
 //
 // Returns an error if the algorithm ID is unknown.
-func newBlockBuilder(id BlockAlgorithmID, totalKeys uint64, globalSeed uint64,
+func newBlockBuilder(id Algorithm, totalKeys uint64, globalSeed uint64,
 	payloadSize, fingerprintSize int) (blockBuilder, error) {
 	switch id {
 	case AlgoBijection:
@@ -192,7 +192,7 @@ func newBlockBuilder(id BlockAlgorithmID, totalKeys uint64, globalSeed uint64,
 	case AlgoPTRHash:
 		return ptrhash.NewBuilder(totalKeys, globalSeed, payloadSize, fingerprintSize), nil
 	}
-	return nil, fmt.Errorf("%w: unknown algorithm ID %d", streamerrors.ErrInvalidGeometry, id)
+	return nil, fmt.Errorf("%w: unknown algorithm ID %d", sherr.ErrInvalidGeometry, id)
 }
 
 // newBlockDecoder creates a decoder for query-time slot computation.
@@ -204,12 +204,12 @@ func newBlockBuilder(id BlockAlgorithmID, totalKeys uint64, globalSeed uint64,
 //
 // Returns an error if the algorithm ID is unknown or globalConfig is invalid.
 // The returned decoder is safe for concurrent use.
-func newBlockDecoder(id BlockAlgorithmID, globalConfig []byte, globalSeed uint64) (blockDecoder, error) {
+func newBlockDecoder(id Algorithm, globalConfig []byte, globalSeed uint64) (blockDecoder, error) {
 	switch id {
 	case AlgoBijection:
 		return bijection.NewDecoder(globalConfig, globalSeed)
 	case AlgoPTRHash:
 		return ptrhash.NewDecoder(globalConfig, globalSeed)
 	}
-	return nil, fmt.Errorf("%w: unknown algorithm ID %d", streamerrors.ErrInvalidGeometry, id)
+	return nil, fmt.Errorf("%w: unknown algorithm ID %d", sherr.ErrInvalidGeometry, id)
 }

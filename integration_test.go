@@ -66,23 +66,20 @@ func TestIntegrationMatrix(t *testing.T) {
 
 	algorithms := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
 	}
 
 	buildModes := []struct {
-		name string
-		opts func(t *testing.T) []BuildOption
+		name     string
+		unsorted bool
+		opts     func(t *testing.T) []BuildOption
 	}{
-		{"sorted", func(t *testing.T) []BuildOption { return nil }},
-		{"unsorted", func(t *testing.T) []BuildOption {
-			return []BuildOption{WithUnsortedInput(TempDir(t.TempDir()))}
-		}},
-		{"parallel", func(t *testing.T) []BuildOption {
-			return []BuildOption{WithWorkers(4)}
-		}},
+		{"sorted", false, func(t *testing.T) []BuildOption { return nil }},
+		{"unsorted", true, func(t *testing.T) []BuildOption { return nil }},
+		{"parallel", false, func(t *testing.T) []BuildOption { return []BuildOption{WithWorkers(4)} }},
 	}
 
 	keySizes := []int{16, 24}
@@ -138,13 +135,14 @@ func TestIntegrationMatrix(t *testing.T) {
 							bmOpts := bm.opts(t)
 							opts = append(opts, bmOpts...)
 
-							// For sorted and parallel modes, sort keys
-							if bm.name != "unsorted" {
-								sortKeysAndPayloads(keys, payloads)
-							}
-
 							// Build and open
-							idx := buildAndOpen(t, keys, payloads, opts...)
+							var idx *Index
+							if bm.unsorted {
+								idx = buildAndOpenUnsorted(t, keys, payloads, t.TempDir(), opts...)
+							} else {
+								sortKeysAndPayloads(keys, payloads)
+								idx = buildAndOpen(t, keys, payloads, opts...)
+							}
 							defer idx.Close()
 
 							// Verify MPHF: unique ranks in [0, N)
@@ -181,23 +179,20 @@ func TestIntegrationMatrixClustered(t *testing.T) {
 
 	algorithms := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},
 	}
 
 	buildModes := []struct {
-		name string
-		opts func(t *testing.T) []BuildOption
+		name     string
+		unsorted bool
+		opts     func(t *testing.T) []BuildOption
 	}{
-		{"sorted", func(t *testing.T) []BuildOption { return nil }},
-		{"unsorted", func(t *testing.T) []BuildOption {
-			return []BuildOption{WithUnsortedInput(TempDir(t.TempDir()))}
-		}},
-		{"parallel", func(t *testing.T) []BuildOption {
-			return []BuildOption{WithWorkers(4)}
-		}},
+		{"sorted", false, func(t *testing.T) []BuildOption { return nil }},
+		{"unsorted", true, func(t *testing.T) []BuildOption { return nil }},
+		{"parallel", false, func(t *testing.T) []BuildOption { return []BuildOption{WithWorkers(4)} }},
 	}
 
 	type dataMode struct {
@@ -252,11 +247,13 @@ func TestIntegrationMatrixClustered(t *testing.T) {
 					}
 					opts = append(opts, bm.opts(t)...)
 
-					if bm.name != "unsorted" {
+					var idx *Index
+					if bm.unsorted {
+						idx = buildAndOpenUnsorted(t, keys, payloads, t.TempDir(), opts...)
+					} else {
 						sortKeysAndPayloads(keys, payloads)
+						idx = buildAndOpen(t, keys, payloads, opts...)
 					}
-
-					idx := buildAndOpen(t, keys, payloads, opts...)
 					defer idx.Close()
 
 					verifyMPHF(t, idx, keys)
@@ -280,7 +277,7 @@ func TestIntegrationMatrixClustered(t *testing.T) {
 func TestAllPayloadFingerprintCombos(t *testing.T) {
 	algorithms := []struct {
 		name string
-		algo BlockAlgorithmID
+		algo Algorithm
 	}{
 		{"bijection", AlgoBijection},
 		{"ptrhash", AlgoPTRHash},

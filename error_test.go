@@ -11,7 +11,7 @@ import (
 	"slices"
 	"testing"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ func TestOpenEmptyFile(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for empty file")
 	}
-	if !errors.Is(err, streamerrors.ErrTruncatedFile) {
+	if !errors.Is(err, sherr.ErrTruncatedFile) {
 		t.Errorf("Expected ErrTruncatedFile, got %v", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestOpenCorruptedMagic(t *testing.T) {
 	}
 
 	_, err = Open(indexPath)
-	if !errors.Is(err, streamerrors.ErrInvalidMagic) {
+	if !errors.Is(err, sherr.ErrInvalidMagic) {
 		t.Errorf("Expected ErrInvalidMagic, got %v", err)
 	}
 }
@@ -99,7 +99,7 @@ func TestOpenCorruptedVersion(t *testing.T) {
 	}
 
 	_, err = Open(indexPath)
-	if !errors.Is(err, streamerrors.ErrInvalidVersion) {
+	if !errors.Is(err, sherr.ErrInvalidVersion) {
 		t.Errorf("Expected ErrInvalidVersion, got %v", err)
 	}
 }
@@ -124,7 +124,7 @@ func TestOpenTruncatedHeader(t *testing.T) {
 	}
 
 	_, err = Open(indexPath)
-	if !errors.Is(err, streamerrors.ErrTruncatedFile) {
+	if !errors.Is(err, sherr.ErrTruncatedFile) {
 		t.Errorf("Expected ErrTruncatedFile, got %v", err)
 	}
 }
@@ -154,7 +154,7 @@ func TestOpenTruncatedFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for truncated file")
 	}
-	if !errors.Is(err, streamerrors.ErrTruncatedFile) && !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+	if !errors.Is(err, sherr.ErrTruncatedFile) && !errors.Is(err, sherr.ErrCorruptedIndex) {
 		t.Errorf("Expected ErrTruncatedFile or ErrCorruptedIndex, got %v", err)
 	}
 }
@@ -207,7 +207,7 @@ func TestBuilderReadOnlyDirectory(t *testing.T) {
 
 	indexPath := filepath.Join(readOnlyDir, "test.idx")
 	ctx := context.Background()
-	_, err := NewBuilder(ctx, indexPath, 100)
+	_, err := NewSortedBuilder(ctx, indexPath, 100)
 	if err == nil {
 		t.Error("Expected error for read-only directory")
 	}
@@ -215,7 +215,7 @@ func TestBuilderReadOnlyDirectory(t *testing.T) {
 
 func TestBuilderInvalidPath(t *testing.T) {
 	ctx := context.Background()
-	_, err := NewBuilder(ctx, "/nonexistent/directory/test.idx", 100)
+	_, err := NewSortedBuilder(ctx, "/nonexistent/directory/test.idx", 100)
 	if err == nil {
 		t.Error("Expected error for non-existent parent directory")
 	}
@@ -225,11 +225,11 @@ func TestBuilderZeroKeys(t *testing.T) {
 	tmpDir := t.TempDir()
 	indexPath := filepath.Join(tmpDir, "zero.idx")
 	ctx := context.Background()
-	_, err := NewBuilder(ctx, indexPath, 0)
+	_, err := NewSortedBuilder(ctx, indexPath, 0)
 	if err == nil {
 		t.Error("Expected error for zero keys")
 	}
-	if !errors.Is(err, streamerrors.ErrEmptyIndex) {
+	if !errors.Is(err, sherr.ErrEmptyIndex) {
 		t.Errorf("Expected ErrEmptyIndex, got %v", err)
 	}
 }
@@ -252,9 +252,9 @@ func TestBuilderDuplicateKeys(t *testing.T) {
 
 	slices.SortFunc(keys, bytes.Compare)
 
-	builder, err := NewBuilder(ctx, indexPath, uint64(len(keys)))
+	builder, err := NewSortedBuilder(ctx, indexPath, uint64(len(keys)))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 
 	var dupErr error
@@ -273,7 +273,7 @@ func TestBuilderDuplicateKeys(t *testing.T) {
 
 	if dupErr == nil {
 		t.Error("Expected error for duplicate keys")
-	} else if !errors.Is(dupErr, streamerrors.ErrDuplicateKey) {
+	} else if !errors.Is(dupErr, sherr.ErrDuplicateKey) {
 		t.Errorf("Expected ErrDuplicateKey, got: %v", dupErr)
 	}
 }
@@ -284,9 +284,9 @@ func TestBuilderKeyCountMismatch(t *testing.T) {
 
 	t.Run("TooFewKeys", func(t *testing.T) {
 		indexPath := filepath.Join(tmpDir, "toofew.idx")
-		builder, err := NewBuilder(ctx, indexPath, 100)
+		builder, err := NewSortedBuilder(ctx, indexPath, 100)
 		if err != nil {
-			t.Fatalf("NewBuilder failed: %v", err)
+			t.Fatalf("newBuilder failed: %v", err)
 		}
 
 		for i := range 50 {
@@ -302,16 +302,16 @@ func TestBuilderKeyCountMismatch(t *testing.T) {
 		err = builder.Finish()
 		if err == nil {
 			t.Error("Expected error for key count mismatch")
-		} else if !errors.Is(err, streamerrors.ErrKeyCountMismatch) {
+		} else if !errors.Is(err, sherr.ErrKeyCountMismatch) {
 			t.Errorf("Expected ErrKeyCountMismatch, got: %v", err)
 		}
 	})
 
 	t.Run("TooManyKeys", func(t *testing.T) {
 		indexPath := filepath.Join(tmpDir, "toomany2.idx")
-		builder, err := NewBuilder(ctx, indexPath, 5)
+		builder, err := NewSortedBuilder(ctx, indexPath, 5)
 		if err != nil {
-			t.Fatalf("NewBuilder failed: %v", err)
+			t.Fatalf("newBuilder failed: %v", err)
 		}
 		var addErr error
 		for i := range 10 {
@@ -330,7 +330,7 @@ func TestBuilderKeyCountMismatch(t *testing.T) {
 		}
 		if addErr == nil {
 			t.Error("Expected error for too many keys")
-		} else if !errors.Is(addErr, streamerrors.ErrKeyCountMismatch) {
+		} else if !errors.Is(addErr, sherr.ErrKeyCountMismatch) {
 			t.Errorf("Expected ErrKeyCountMismatch, got: %v", addErr)
 		}
 	})
@@ -340,14 +340,14 @@ func TestParallelBuilderEmptyBlocksOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	indexPath := filepath.Join(tmpDir, "empty_blocks.idx")
 	ctx := context.Background()
-	builder, err := NewBuilder(ctx, indexPath, 1000, WithWorkers(2))
+	builder, err := NewSortedBuilder(ctx, indexPath, 1000, WithWorkers(2))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 	err = builder.Finish()
 	if err == nil {
 		t.Error("Expected error when finishing with no keys added")
-	} else if !errors.Is(err, streamerrors.ErrKeyCountMismatch) {
+	} else if !errors.Is(err, sherr.ErrKeyCountMismatch) {
 		t.Errorf("Expected ErrKeyCountMismatch, got: %v", err)
 	}
 	builder.Close()
@@ -358,9 +358,9 @@ func TestFinishAfterClose(t *testing.T) {
 	indexPath := filepath.Join(tmpDir, "finish_after_close.idx")
 	ctx := context.Background()
 	numKeys := 10
-	builder, err := NewBuilder(ctx, indexPath, uint64(numKeys))
+	builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 	keys := make([][]byte, numKeys)
 	for i := range numKeys {
@@ -381,7 +381,7 @@ func TestFinishAfterClose(t *testing.T) {
 	}
 	builder.Close()
 	err = builder.Finish()
-	if !errors.Is(err, streamerrors.ErrBuilderClosed) {
+	if !errors.Is(err, sherr.ErrBuilderClosed) {
 		t.Errorf("Expected ErrBuilderClosed after Close+Finish, got: %v", err)
 	}
 }
@@ -391,9 +391,9 @@ func TestAddKeyAfterFinish(t *testing.T) {
 	indexPath := filepath.Join(tmpDir, "add_after_finish.idx")
 	ctx := context.Background()
 	numKeys := 10
-	builder, err := NewBuilder(ctx, indexPath, uint64(numKeys))
+	builder, err := NewSortedBuilder(ctx, indexPath, uint64(numKeys))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 	keys := make([][]byte, numKeys)
 	for i := range numKeys {
@@ -422,7 +422,7 @@ func TestAddKeyAfterFinish(t *testing.T) {
 	}
 	extraKey := PreHash(extraSrc)
 	err = builder.AddKey(extraKey, 0)
-	if !errors.Is(err, streamerrors.ErrBuilderClosed) {
+	if !errors.Is(err, sherr.ErrBuilderClosed) {
 		t.Errorf("Expected ErrBuilderClosed, got: %v", err)
 	}
 }
@@ -431,17 +431,17 @@ func TestUnsortedBuilder_KeyTooShort(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	output := filepath.Join(tmpDir, "unsorted_short.idx")
-	builder, err := NewBuilder(ctx, output, 100,
-		WithUnsortedInput(TempDir(tmpDir)),
+	builder, err := NewUnsortedBuilder(ctx, output, 100,
+		tmpDir,
 		WithPayload(4),
 	)
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 	defer builder.Close()
 	shortKey := make([]byte, 8)
 	err = builder.AddKey(shortKey, 0)
-	if !errors.Is(err, streamerrors.ErrKeyTooShort) {
+	if !errors.Is(err, sherr.ErrKeyTooShort) {
 		t.Errorf("Expected ErrKeyTooShort, got %v", err)
 	}
 }
@@ -451,12 +451,12 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Run("UnsortedTooFewKeys", func(t *testing.T) {
 		output := filepath.Join(tmpDir, "unsorted_toofew.idx")
-		builder, err := NewBuilder(ctx, output, 100,
-			WithUnsortedInput(TempDir(tmpDir)),
+		builder, err := NewUnsortedBuilder(ctx, output, 100,
+			tmpDir,
 			WithPayload(4),
 		)
 		if err != nil {
-			t.Fatalf("NewBuilder failed: %v", err)
+			t.Fatalf("newBuilder failed: %v", err)
 		}
 		for i := range 50 {
 			key := make([]byte, 16)
@@ -470,18 +470,18 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 		err = builder.Finish()
 		if err == nil {
 			t.Error("Expected error for key count mismatch, got nil")
-		} else if !errors.Is(err, streamerrors.ErrKeyCountMismatch) {
+		} else if !errors.Is(err, sherr.ErrKeyCountMismatch) {
 			t.Errorf("Expected ErrKeyCountMismatch, got: %v", err)
 		}
 	})
 	t.Run("UnsortedTooManyKeys", func(t *testing.T) {
 		output := filepath.Join(tmpDir, "unsorted_toomany.idx")
-		builder, err := NewBuilder(ctx, output, 50,
-			WithUnsortedInput(TempDir(tmpDir)),
+		builder, err := NewUnsortedBuilder(ctx, output, 50,
+			tmpDir,
 			WithPayload(4),
 		)
 		if err != nil {
-			t.Fatalf("NewBuilder failed: %v", err)
+			t.Fatalf("newBuilder failed: %v", err)
 		}
 		var addErr error
 		for i := range 100 {
@@ -500,7 +500,7 @@ func TestUnsortedBuilder_KeyCountMismatch(t *testing.T) {
 		}
 		if addErr == nil {
 			t.Error("Expected error for adding too many keys, got nil")
-		} else if !errors.Is(addErr, streamerrors.ErrKeyCountMismatch) {
+		} else if !errors.Is(addErr, sherr.ErrKeyCountMismatch) {
 			t.Errorf("Expected ErrKeyCountMismatch, got: %v", addErr)
 		}
 	})
@@ -510,9 +510,17 @@ func TestUnsortedModeInvalidTempDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	indexPath := filepath.Join(tmpDir, "test.idx")
 	ctx := context.Background()
-	_, err := NewBuilder(ctx, indexPath, 100,
-		WithUnsortedInput(TempDir("/nonexistent/directory")),
+	ub, err := NewUnsortedBuilder(ctx, indexPath, 100,
+		"/nonexistent/directory",
 	)
+	if err != nil {
+		return // Constructor caught the error
+	}
+	defer ub.Close()
+	key := make([]byte, 16)
+	binary.BigEndian.PutUint64(key[0:8], 1)
+	binary.BigEndian.PutUint64(key[8:16], 2)
+	err = ub.AddKey(key, 0)
 	if err == nil {
 		t.Error("Expected error for invalid temp directory")
 	}
@@ -527,9 +535,17 @@ func TestUnsortedModeReadOnlyTempDir(t *testing.T) {
 
 	indexPath := filepath.Join(tmpDir, "test.idx")
 	ctx := context.Background()
-	_, err := NewBuilder(ctx, indexPath, 100,
-		WithUnsortedInput(TempDir(readOnlyDir)),
+	ub, err := NewUnsortedBuilder(ctx, indexPath, 100,
+		readOnlyDir,
 	)
+	if err != nil {
+		return // Constructor caught the error
+	}
+	defer ub.Close()
+	key := make([]byte, 16)
+	binary.BigEndian.PutUint64(key[0:8], 1)
+	binary.BigEndian.PutUint64(key[8:16], 2)
+	err = ub.AddKey(key, 0)
 	if err == nil {
 		t.Error("Expected error for read-only temp directory")
 	}
@@ -544,7 +560,7 @@ func TestMaxPayloadSize(t *testing.T) {
 	ctx := context.Background()
 
 	successPath := filepath.Join(tmpDir, "max_payload_ok.idx")
-	builder, err := NewBuilder(ctx, successPath, 1000, WithPayload(maxPayloadSize))
+	builder, err := NewSortedBuilder(ctx, successPath, 1000, WithPayload(maxPayloadSize))
 	if err != nil {
 		t.Errorf("Expected success at max payload size, got %v", err)
 	} else {
@@ -552,8 +568,8 @@ func TestMaxPayloadSize(t *testing.T) {
 	}
 
 	failPath := filepath.Join(tmpDir, "max_payload_fail.idx")
-	_, err = NewBuilder(ctx, failPath, 1000, WithPayload(maxPayloadSize+1))
-	if !errors.Is(err, streamerrors.ErrPayloadTooLarge) {
+	_, err = NewSortedBuilder(ctx, failPath, 1000, WithPayload(maxPayloadSize+1))
+	if !errors.Is(err, sherr.ErrPayloadTooLarge) {
 		t.Errorf("Expected ErrPayloadTooLarge above max, got %v", err)
 	}
 }
@@ -562,8 +578,8 @@ func TestNegativePayloadSizeError(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctx := context.Background()
 	failPath := filepath.Join(tmpDir, "neg_payload.idx")
-	_, err := NewBuilder(ctx, failPath, 1000, WithPayload(-1))
-	if !errors.Is(err, streamerrors.ErrPayloadTooLarge) {
+	_, err := NewSortedBuilder(ctx, failPath, 1000, WithPayload(-1))
+	if !errors.Is(err, sherr.ErrPayloadTooLarge) {
 		t.Errorf("Expected ErrPayloadTooLarge for negative payloadSize, got %v", err)
 	}
 }
@@ -572,8 +588,8 @@ func TestNegativeFingerprintSizeError(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctx := context.Background()
 	failPath := filepath.Join(tmpDir, "neg_fp.idx")
-	_, err := NewBuilder(ctx, failPath, 1000, WithFingerprint(-1))
-	if !errors.Is(err, streamerrors.ErrFingerprintTooLarge) {
+	_, err := NewSortedBuilder(ctx, failPath, 1000, WithFingerprint(-1))
+	if !errors.Is(err, sherr.ErrFingerprintTooLarge) {
 		t.Errorf("Expected ErrFingerprintTooLarge for negative fingerprintSize, got %v", err)
 	}
 }
@@ -583,7 +599,7 @@ func TestFingerprintSizeBoundary(t *testing.T) {
 	ctx := context.Background()
 
 	successPath := filepath.Join(tmpDir, "fp4_ok.idx")
-	builder, err := NewBuilder(ctx, successPath, 1000, WithFingerprint(4))
+	builder, err := NewSortedBuilder(ctx, successPath, 1000, WithFingerprint(4))
 	if err != nil {
 		t.Errorf("FingerprintSize=4 should succeed, got error: %v", err)
 	} else {
@@ -591,8 +607,8 @@ func TestFingerprintSizeBoundary(t *testing.T) {
 	}
 
 	failPath := filepath.Join(tmpDir, "fp5_fail.idx")
-	_, err = NewBuilder(ctx, failPath, 1000, WithFingerprint(5))
-	if !errors.Is(err, streamerrors.ErrFingerprintTooLarge) {
+	_, err = NewSortedBuilder(ctx, failPath, 1000, WithFingerprint(5))
+	if !errors.Is(err, sherr.ErrFingerprintTooLarge) {
 		t.Errorf("FingerprintSize=5 should return ErrFingerprintTooLarge, got: %v", err)
 	}
 }
@@ -615,7 +631,7 @@ func TestPayloadOverflow(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("size%d_val%d", tc.payloadSize, tc.payload), func(t *testing.T) {
 			path := filepath.Join(tempDir, fmt.Sprintf("test_%d_%d.idx", tc.payloadSize, tc.payload))
-			builder, err := NewBuilder(context.Background(), path, 10, WithPayload(tc.payloadSize))
+			builder, err := NewSortedBuilder(context.Background(), path, 10, WithPayload(tc.payloadSize))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -624,7 +640,7 @@ func TestPayloadOverflow(t *testing.T) {
 			binary.BigEndian.PutUint64(key, 1)
 			err = builder.AddKey(key, tc.payload)
 			if tc.shouldFail {
-				if !errors.Is(err, streamerrors.ErrPayloadOverflow) {
+				if !errors.Is(err, sherr.ErrPayloadOverflow) {
 					t.Errorf("Expected ErrPayloadOverflow for payload %d with size %d, got %v", tc.payload, tc.payloadSize, err)
 				}
 			} else {
@@ -648,7 +664,7 @@ func TestKeyTooLong(t *testing.T) {
 		yield(longKey, 0)
 	}
 	err := buildUnsortedFromIter(ctx, indexPath, keyIter)
-	if !errors.Is(err, streamerrors.ErrKeyTooLong) {
+	if !errors.Is(err, sherr.ErrKeyTooLong) {
 		t.Errorf("Expected ErrKeyTooLong, got: %v", err)
 	}
 }
@@ -657,13 +673,13 @@ func TestKeyTooShortForFingerprint(t *testing.T) {
 	tmpDir := t.TempDir()
 	indexPath := filepath.Join(tmpDir, "short_key_fp.idx")
 	ctx := context.Background()
-	builder, err := NewBuilder(ctx, indexPath, 10, WithFingerprint(4))
+	builder, err := NewSortedBuilder(ctx, indexPath, 10, WithFingerprint(4))
 	if err != nil {
-		t.Fatalf("NewBuilder failed: %v", err)
+		t.Fatalf("newBuilder failed: %v", err)
 	}
 	shortKey := make([]byte, 2)
 	err = builder.AddKey(shortKey, 0)
-	if !errors.Is(err, streamerrors.ErrKeyTooShort) {
+	if !errors.Is(err, sherr.ErrKeyTooShort) {
 		t.Errorf("Expected ErrKeyTooShort, got: %v", err)
 	}
 	builder.Close()
@@ -689,14 +705,14 @@ func TestQueryWrongKeySize(t *testing.T) {
 	defer idx.Close()
 
 	// Empty key
-	_, err = idx.Query([]byte{})
-	if !errors.Is(err, streamerrors.ErrKeyTooShort) {
+	_, err = idx.QueryRank([]byte{})
+	if !errors.Is(err, sherr.ErrKeyTooShort) {
 		t.Errorf("Expected ErrKeyTooShort for empty key, got %v", err)
 	}
 
 	// Short key
-	_, err = idx.Query([]byte{0x01, 0x02})
-	if !errors.Is(err, streamerrors.ErrKeyTooShort) {
+	_, err = idx.QueryRank([]byte{0x01, 0x02})
+	if !errors.Is(err, sherr.ErrKeyTooShort) {
 		t.Errorf("Expected ErrKeyTooShort for short key, got %v", err)
 	}
 }
@@ -724,8 +740,8 @@ func TestQueryNoPayload(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer idx.Close()
-	_, err = idx.QueryPayload(entries[0].Key)
-	if !errors.Is(err, streamerrors.ErrNoPayload) {
+	_, err = idx.WithPayload()
+	if !errors.Is(err, sherr.ErrNoPayload) {
 		t.Errorf("QueryPayload on no-payload index: got %v, want ErrNoPayload", err)
 	}
 }
@@ -747,7 +763,7 @@ func TestCloseAndQuery(t *testing.T) {
 	}
 
 	// Verify queries work before close
-	if _, err := idx.Query(keys[0]); err != nil {
+	if _, err := idx.QueryRank(keys[0]); err != nil {
 		t.Fatalf("Query before close failed: %v", err)
 	}
 
@@ -758,18 +774,18 @@ func TestCloseAndQuery(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	_, err = idx.Query(keys[0])
-	if !errors.Is(err, streamerrors.ErrIndexClosed) {
+	_, err = idx.QueryRank(keys[0])
+	if !errors.Is(err, sherr.ErrIndexClosed) {
 		t.Errorf("Query after close: got %v, want ErrIndexClosed", err)
 	}
 
-	_, err = idx.QueryPayload(keys[0])
-	if !errors.Is(err, streamerrors.ErrIndexClosed) {
+	_, _, err = (&PayloadIndex{idx}).QueryPayload(keys[0])
+	if !errors.Is(err, sherr.ErrIndexClosed) {
 		t.Errorf("QueryPayload after close: got %v, want ErrIndexClosed", err)
 	}
 
 	err = idx.Verify()
-	if !errors.Is(err, streamerrors.ErrIndexClosed) {
+	if !errors.Is(err, sherr.ErrIndexClosed) {
 		t.Errorf("Verify after close: got %v, want ErrIndexClosed", err)
 	}
 
@@ -787,7 +803,7 @@ func TestDecodeHeaderErrors(t *testing.T) {
 	t.Run("Truncated", func(t *testing.T) {
 		data := make([]byte, 32)
 		_, err := decodeHeader(data)
-		if !errors.Is(err, streamerrors.ErrTruncatedFile) {
+		if !errors.Is(err, sherr.ErrTruncatedFile) {
 			t.Errorf("Expected ErrTruncatedFile, got %v", err)
 		}
 	})
@@ -799,7 +815,7 @@ func TestDecodeHeaderErrors(t *testing.T) {
 		data := make([]byte, headerSize)
 		hdr.encodeTo(data)
 		_, err := decodeHeader(data)
-		if !errors.Is(err, streamerrors.ErrInvalidMagic) {
+		if !errors.Is(err, sherr.ErrInvalidMagic) {
 			t.Errorf("Expected ErrInvalidMagic, got %v", err)
 		}
 	})
@@ -811,7 +827,7 @@ func TestDecodeHeaderErrors(t *testing.T) {
 		data := make([]byte, headerSize)
 		hdr.encodeTo(data)
 		_, err := decodeHeader(data)
-		if !errors.Is(err, streamerrors.ErrInvalidVersion) {
+		if !errors.Is(err, sherr.ErrInvalidVersion) {
 			t.Errorf("Expected ErrInvalidVersion, got %v", err)
 		}
 	})
@@ -828,7 +844,7 @@ func TestDecodeHeaderErrors(t *testing.T) {
 		data := make([]byte, headerSize)
 		hdr.encodeTo(data)
 		_, err := decodeHeader(data)
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("Expected ErrCorruptedIndex for PayloadSize > maxPayloadSize, got %v", err)
 		}
 	})
@@ -844,7 +860,7 @@ func TestDecodeHeaderErrors(t *testing.T) {
 		data := make([]byte, headerSize)
 		hdr.encodeTo(data)
 		_, err := decodeHeader(data)
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("Expected ErrCorruptedIndex for FingerprintSize > maxFingerprintSize, got %v", err)
 		}
 	})
@@ -859,7 +875,7 @@ func TestDecodeHeaderErrors(t *testing.T) {
 		data := make([]byte, headerSize)
 		hdr.encodeTo(data)
 		_, err := decodeHeader(data)
-		if !errors.Is(err, streamerrors.ErrCorruptedIndex) {
+		if !errors.Is(err, sherr.ErrCorruptedIndex) {
 			t.Errorf("Expected ErrCorruptedIndex for NumBlocks==0 with TotalKeys>0, got %v", err)
 		}
 	})
@@ -868,7 +884,7 @@ func TestDecodeHeaderErrors(t *testing.T) {
 func TestDecodeFooterErrors(t *testing.T) {
 	data := make([]byte, 16)
 	_, err := decodeFooter(data)
-	if !errors.Is(err, streamerrors.ErrTruncatedFile) {
+	if !errors.Is(err, sherr.ErrTruncatedFile) {
 		t.Errorf("Expected ErrTruncatedFile, got %v", err)
 	}
 }
@@ -894,7 +910,7 @@ func TestGetStatsCorruptedFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for corrupted file")
 	}
-	if !errors.Is(err, streamerrors.ErrTruncatedFile) {
+	if !errors.Is(err, sherr.ErrTruncatedFile) {
 		t.Errorf("Expected ErrTruncatedFile for sub-header-size file, got %v", err)
 	}
 }
@@ -908,11 +924,11 @@ func TestErrTooManyKeys(t *testing.T) {
 	indexPath := filepath.Join(tmpDir, "toomany.idx")
 	ctx := context.Background()
 
-	_, err := NewBuilder(ctx, indexPath, maxKeys+1)
+	_, err := NewSortedBuilder(ctx, indexPath, maxKeys+1)
 	if err == nil {
 		t.Fatal("Expected error for totalKeys exceeding maxKeys")
 	}
-	if !errors.Is(err, streamerrors.ErrTooManyKeys) {
+	if !errors.Is(err, sherr.ErrTooManyKeys) {
 		t.Errorf("Expected ErrTooManyKeys, got %v", err)
 	}
 }
@@ -976,7 +992,7 @@ func TestErrChecksumFailed(t *testing.T) {
 	defer idx2.Close()
 
 	err = idx2.Verify()
-	if !errors.Is(err, streamerrors.ErrChecksumFailed) {
+	if !errors.Is(err, sherr.ErrChecksumFailed) {
 		t.Errorf("Expected ErrChecksumFailed, got %v", err)
 	}
 }
@@ -1015,8 +1031,8 @@ func TestNonMemberRejection(t *testing.T) {
 		binary.BigEndian.PutUint64(nonMember[0:8], uint64(0xBADBAD0000000000)|uint64(i))
 		fillFromRNG(rng, nonMember[8:])
 
-		_, err := idx.Query(nonMember)
-		if errors.Is(err, streamerrors.ErrNotFound) {
+		_, err := idx.QueryRank(nonMember)
+		if errors.Is(err, sherr.ErrNotFound) {
 			notFoundCount++
 		} else if err != nil {
 			otherErrCount++
@@ -1041,21 +1057,21 @@ func TestNonMemberRejection(t *testing.T) {
 
 func TestUnknownAlgorithmID(t *testing.T) {
 	t.Run("Builder", func(t *testing.T) {
-		_, err := newBlockBuilder(BlockAlgorithmID(99), 1000, 0, 0, 0)
+		_, err := newBlockBuilder(Algorithm(99), 1000, 0, 0, 0)
 		if err == nil {
 			t.Fatal("Expected error for unknown algorithm ID")
 		}
-		if !errors.Is(err, streamerrors.ErrInvalidGeometry) {
+		if !errors.Is(err, sherr.ErrInvalidGeometry) {
 			t.Errorf("Expected ErrInvalidGeometry, got %v", err)
 		}
 	})
 
 	t.Run("Decoder", func(t *testing.T) {
-		_, err := newBlockDecoder(BlockAlgorithmID(99), nil, 0)
+		_, err := newBlockDecoder(Algorithm(99), nil, 0)
 		if err == nil {
 			t.Fatal("Expected error for unknown algorithm ID")
 		}
-		if !errors.Is(err, streamerrors.ErrInvalidGeometry) {
+		if !errors.Is(err, sherr.ErrInvalidGeometry) {
 			t.Errorf("Expected ErrInvalidGeometry, got %v", err)
 		}
 	})

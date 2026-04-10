@@ -9,7 +9,7 @@ import (
 	"os"
 	"sync"
 
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 	intbits "github.com/tamirms/streamhash/internal/bits"
 	"golang.org/x/sync/errgroup"
 )
@@ -26,43 +26,8 @@ const (
 	maxKeys = uint64(1) << 40
 )
 
-// Builder provides an AddKey-style API for building indexes.
-// Supports both sorted and unsorted input modes.
-//
-// Usage (sorted mode - default):
-//
-//	builder, err := streamhash.NewBuilder(ctx, "index.idx", totalKeys, opts...)
-//	if err != nil { return err }
-//	defer builder.Close() // Clean up on error
-//
-//	for key, payload := range sortedData {
-//	    if err := builder.AddKey(key, payload); err != nil { return err }
-//	}
-//	return builder.Finish()
-//
-// Usage (unsorted mode):
-//
-//	builder, err := streamhash.NewBuilder(ctx, "index.idx", totalKeys, WithUnsortedInput(), opts...)
-//	if err != nil { return err }
-//	defer builder.Close()
-//
-//	for key, payload := range anyOrderData {
-//	    if err := builder.AddKey(key, payload); err != nil { return err }
-//	}
-//	return builder.Finish()
-//
-// For parallel building with N workers:
-//
-//	builder, err := streamhash.NewBuilder(ctx, "index.idx", totalKeys,
-//	    WithPayload(4), WithWorkers(8))
-//	if err != nil { return err }
-//	defer builder.Close()
-//
-//	for key, payload := range sortedData {
-//	    if err := builder.AddKey(key, payload); err != nil { return err }
-//	}
-//	return builder.Finish()
-type Builder struct {
+// builder is the internal shared core for SortedBuilder and UnsortedBuilder.
+type builder struct {
 	ctx              context.Context
 	cfg              *buildConfig
 	numBlocks        uint32
@@ -92,32 +57,31 @@ type Builder struct {
 	entryPool      sync.Pool     // Pool of []routedEntry slices for reuse
 	metadataPool   sync.Pool     // Pool of []byte slices for metadata buffers
 
+	// Reusable buffers for single-threaded buildBlock/commitEmptyBlock
+	metadataBuf []byte
+	payloadsBuf []byte
+
 	// Sorted mode validation
 	lastBlockID int64 // Last seen block ID (-1 initially), for detecting out-of-order keys
 
 	// Key count tracking
 	totalKeysAdded uint64 // Number of keys added via AddKey
-
-	// Unsorted mode buffer (nil in sorted mode)
-	unsortedBuf *unsortedBuffer
 }
 
-// NewBuilder creates a new builder for building indexes.
-// By default, keys must be added in sorted order by block index.
-// Use WithUnsortedInput() to enable unsorted input mode.
+// newBuilder creates the shared builder core used by NewSortedBuilder and NewUnsortedBuilder.
 //
 // totalKeys must be the exact number of keys that will be added.
 //
 // Use WithWorkers(N) to enable parallel building with N workers.
 // With workers > 1, blocks are built in parallel while maintaining
 // the streaming API and O(W × block_size) memory.
-func NewBuilder(ctx context.Context, output string, totalKeys uint64, opts ...BuildOption) (*Builder, error) {
+func newBuilder(ctx context.Context, output string, totalKeys uint64, opts ...BuildOption) (*builder, error) {
 	if totalKeys == 0 {
-		return nil, streamerrors.ErrEmptyIndex
+		return nil, sherr.ErrEmptyIndex
 	}
 
 	if totalKeys > maxKeys {
-		return nil, streamerrors.ErrTooManyKeys
+		return nil, sherr.ErrTooManyKeys
 	}
 
 	cfg := defaultBuildConfig()
@@ -127,10 +91,10 @@ func NewBuilder(ctx context.Context, output string, totalKeys uint64, opts ...Bu
 	cfg.totalKeys = totalKeys
 
 	if cfg.payloadSize < 0 || cfg.payloadSize > maxPayloadSize {
-		return nil, streamerrors.ErrPayloadTooLarge
+		return nil, sherr.ErrPayloadTooLarge
 	}
 	if cfg.fingerprintSize < 0 || cfg.fingerprintSize > maxFingerprintSize {
-		return nil, streamerrors.ErrFingerprintTooLarge
+		return nil, sherr.ErrFingerprintTooLarge
 	}
 
 	// Get the block builder for building
@@ -155,7 +119,7 @@ func NewBuilder(ctx context.Context, output string, totalKeys uint64, opts ...Bu
 		workers = int(numBlocks)
 	}
 
-	b := &Builder{
+	b := &builder{
 		ctx:          ctx,
 		cfg:          cfg,
 		numBlocks:    numBlocks,
@@ -167,121 +131,53 @@ func NewBuilder(ctx context.Context, output string, totalKeys uint64, opts ...Bu
 		lastBlockID: -1,
 	}
 
-	if cfg.unsortedInput {
-		// Unsorted mode: initialize partition flush buffer
-		buf, err := newUnsortedBuffer(cfg, numBlocks)
-		if err != nil {
-			primaryErr := fmt.Errorf("init unsorted mode: %w", err)
-			return nil, errors.Join(primaryErr, iw.close(), os.Remove(output))
-		}
-		b.unsortedBuf = buf
-	} else if workers > 1 {
-		// Sorted parallel mode: initialize channels, pools, and workers
-		b.initParallelWorkers()
-		b.pendingEntries = b.getEntrySlice()
-	}
-	// Single-threaded sorted mode uses bldr directly (already set above)
-
 	return b, nil
 }
 
-// AddKey adds a key-payload pair to the index.
-// In sorted mode, keys must be added in sorted order by block index.
-// In unsorted mode, keys can be added in any order.
-// The payload is passed as uint64; for smaller sizes (e.g., 4 bytes), pass uint64(yourUint32).
-func (b *Builder) AddKey(key []byte, payload uint64) error {
-	if b.closed {
-		return streamerrors.ErrBuilderClosed
-	}
-
-	// Validate key length
+// validateKey checks key length and payload overflow. Shared by all builder types.
+func (b *builder) validateKey(key []byte, payload uint64) error {
 	if len(key) > maxKeyLength {
-		return streamerrors.ErrKeyTooLong
+		return sherr.ErrKeyTooLong
 	}
-
-	// Validate key is at least 16 bytes (required for routing and Mix function)
-	if len(key) < minKeySize {
-		return streamerrors.ErrKeyTooShort
+	if len(key) < MinKeySize {
+		return sherr.ErrKeyTooShort
 	}
-
-	// Validate payload fits in configured PayloadSize
-	// For PayloadSize < 8, check that value doesn't exceed max for that byte width
 	if ps := b.cfg.payloadSize; ps > 0 && ps < 8 {
-		maxValue := uint64(1)<<(ps*8) - 1
-		if payload > maxValue {
-			return streamerrors.ErrPayloadOverflow
+		if payload > uint64(1)<<(ps*8)-1 {
+			return sherr.ErrPayloadOverflow
 		}
 	}
+	return nil
+}
 
-	// Check context periodically (applies to both sorted and unsorted modes)
-	b.keyCounter++
-	if b.keyCounter >= contextCheckInterval {
-		b.keyCounter = 0
+// checkContextSlow is the slow path for context checking, called every 10K keys.
+func (b *builder) checkContextSlow() error {
+	b.keyCounter = 0
+	select {
+	case <-b.ctx.Done():
+		return b.ctx.Err()
+	default:
+	}
+	if b.workers > 1 && b.writerDone != nil {
 		select {
-		case <-b.ctx.Done():
-			return b.ctx.Err()
+		case err := <-b.writerDone:
+			b.writerErr = err
+			return err
 		default:
 		}
-		// Check for writer errors in parallel mode
-		if b.workers > 1 && b.writerDone != nil {
-			select {
-			case err := <-b.writerDone:
-				b.writerErr = err
-				return err
-			default:
-			}
-		}
 	}
-
-	// Parse key once: extract k0, k1, compute prefix and blockIdx
-	k0 := binary.LittleEndian.Uint64(key[0:8])
-	k1 := binary.LittleEndian.Uint64(key[8:16])
-	prefix := bits.ReverseBytes64(k0) // Big-endian for monotonic routing
-	blockIdx := intbits.FastRange32(prefix, b.numBlocks)
-
-	if b.unsortedBuf != nil {
-		if b.unsortedBuf.addKey(k0, k1, payload, blockIdx) {
-			if err := b.unsortedBuf.flush(); err != nil {
-				return err
-			}
-		}
-		// Track key count only after successful add
-		b.totalKeysAdded++
-		return nil
-	}
-
-	// Validate monotonicity (sorted mode requires keys in block order)
-	if int64(blockIdx) < b.lastBlockID {
-		return streamerrors.ErrUnsortedInput
-	}
-	b.lastBlockID = int64(blockIdx)
-
-	// Call the appropriate add function.
-	// Fingerprint is computed here for single-threaded mode; parallel mode
-	// defers fingerprint computation to workers (not stored in routedEntry).
-	var err error
-	if b.workers > 1 {
-		err = b.addKeyParallel(k0, k1, payload, blockIdx)
-	} else {
-		fingerprint := extractFingerprint(k0, k1, b.cfg.fingerprintSize)
-		err = b.addKeySingleThreaded(k0, k1, payload, fingerprint, blockIdx)
-	}
-
-	if err != nil {
-		return err
-	}
-	// Track key count only after successful add
-	b.totalKeysAdded++
 	return nil
 }
 
 // addKeySingleThreaded handles AddKey in single-threaded sorted mode.
 // Parameters are pre-parsed in AddKey for efficiency.
-func (b *Builder) addKeySingleThreaded(k0, k1 uint64, payload uint64, fingerprint uint32, blockIdx uint32) error {
+func (b *builder) addKeySingleThreaded(k0, k1 uint64, payload uint64, fingerprint uint32, blockIdx uint32) error {
 	if b.firstKey {
-		// Emit empty blocks for indices 0 to blockIdx-1 using zero-copy
+		// Emit empty blocks for indices 0 to blockIdx-1
 		for b.nextBlockToWrite < blockIdx {
-			b.commitEmptyBlock()
+			if err := b.commitEmptyBlock(); err != nil {
+				return err
+			}
 			b.nextBlockToWrite++
 		}
 		// Reset builder after gap emission leaves it in post-build state
@@ -289,17 +185,19 @@ func (b *Builder) addKeySingleThreaded(k0, k1 uint64, payload uint64, fingerprin
 		b.currentBlockIdx = blockIdx
 		b.firstKey = false
 	} else if blockIdx != b.currentBlockIdx {
-		// Emit current block using zero-copy path
+		// Emit current block
 		if b.currentBlockKeysAdded() > 0 {
-			if err := b.buildBlockZeroCopy(); err != nil {
+			if err := b.buildBlock(); err != nil {
 				return err
 			}
 			b.nextBlockToWrite++
 		}
 
-		// Emit empty blocks for gaps using zero-copy
+		// Emit empty blocks for gaps
 		for b.nextBlockToWrite < blockIdx {
-			b.commitEmptyBlock()
+			if err := b.commitEmptyBlock(); err != nil {
+				return err
+			}
 			b.nextBlockToWrite++
 		}
 		// Reset builder after gap emission leaves it in post-build state
@@ -314,48 +212,44 @@ func (b *Builder) addKeySingleThreaded(k0, k1 uint64, payload uint64, fingerprin
 }
 
 // currentBlockKeysAdded returns the number of keys added to the current block builder.
-func (b *Builder) currentBlockKeysAdded() int {
+func (b *builder) currentBlockKeysAdded() int {
 	return b.builder.KeysAdded()
 }
 
 // resetCurrentBuilder resets the current block builder for reuse.
-func (b *Builder) resetCurrentBuilder() {
+func (b *builder) resetCurrentBuilder() {
 	b.builder.Reset()
 }
 
 // commitEmptyBlock writes an empty block's metadata directly to the index.
-// Resets the builder, builds empty metadata, and commits.
-func (b *Builder) commitEmptyBlock() {
+// Resets the builder, builds empty metadata, and commits via pwrite.
+func (b *builder) commitEmptyBlock() error {
 	b.builder.Reset()
-	metadataDst := b.iw.getMetadataRegion(b.estimateMetadataSize())
-	metadataLen, _, _, _ := b.builder.BuildSeparatedInto(metadataDst, nil)
-	b.iw.commitBlock(metadataLen, 0)
+	metadataNeeded := b.estimateMetadataSize()
+	if cap(b.metadataBuf) < metadataNeeded {
+		b.metadataBuf = make([]byte, metadataNeeded)
+	} else {
+		b.metadataBuf = b.metadataBuf[:metadataNeeded]
+	}
+	metadataLen, _, _, _ := b.builder.BuildSeparatedInto(b.metadataBuf, nil)
+	return b.iw.commitBlockWithData(b.metadataBuf[:metadataLen], nil, 0)
 }
 
 // estimateMetadataSize returns max metadata size for the current block.
-func (b *Builder) estimateMetadataSize() int {
+func (b *builder) estimateMetadataSize() int {
 	return b.builder.MaxMetadataSizeForCurrentBlock()
 }
 
-// Finish completes the index and writes it to disk.
-// After calling Finish, the builder cannot be used again.
-func (b *Builder) Finish() error {
+// finishSorted completes the index in sorted mode.
+func (b *builder) finishSorted() error {
 	if b.closed {
-		return streamerrors.ErrBuilderClosed
+		return sherr.ErrBuilderClosed
 	}
 	b.closed = true
 
-	// Validate key count matches declared total
 	if b.totalKeysAdded != b.cfg.totalKeys {
-		primaryErr := fmt.Errorf("%w: expected %d, got %d", streamerrors.ErrKeyCountMismatch, b.cfg.totalKeys, b.totalKeysAdded)
-		if b.unsortedBuf != nil {
-			return errors.Join(primaryErr, b.unsortedBuf.cleanup(), b.cleanup())
-		}
+		primaryErr := fmt.Errorf("%w: expected %d, got %d", sherr.ErrKeyCountMismatch, b.cfg.totalKeys, b.totalKeysAdded)
 		return errors.Join(primaryErr, b.cleanup())
-	}
-
-	if b.unsortedBuf != nil {
-		return b.finishUnsorted()
 	}
 
 	if b.workers > 1 {
@@ -365,80 +259,163 @@ func (b *Builder) Finish() error {
 }
 
 // finishSingleThreaded completes the build in single-threaded sorted mode.
-func (b *Builder) finishSingleThreaded() error {
-	// Emit final block using zero-copy path
+func (b *builder) finishSingleThreaded() error {
+	// Emit final block
 	if b.currentBlockKeysAdded() > 0 {
-		if err := b.buildBlockZeroCopy(); err != nil {
+		if err := b.buildBlock(); err != nil {
 			return errors.Join(err, b.cleanup())
 		}
 	}
 
 	// Emit trailing empty blocks
 	for b.iw.blockCount < b.numBlocks {
-		b.commitEmptyBlock()
+		if err := b.commitEmptyBlock(); err != nil {
+			return errors.Join(err, b.cleanup())
+		}
 	}
 
 	return b.iw.finalize()
 }
 
-// buildBlockZeroCopy builds the current block directly into mmap (zero-copy).
-func (b *Builder) buildBlockZeroCopy() error {
+// buildBlock builds the current block into reusable buffers and writes via pwrite.
+func (b *builder) buildBlock() error {
 	numKeys := b.currentBlockKeysAdded()
 	entrySize := b.cfg.payloadSize + b.cfg.fingerprintSize
 
-	// Get mmap regions for direct writes
-	payloadOffset := b.iw.keyCount * uint64(entrySize)
-	payloadsDst := b.iw.getPayloadRegion(payloadOffset, uint64(numKeys*entrySize))
-	metadataDst := b.iw.getMetadataRegion(b.estimateMetadataSize())
+	// Reuse buffers (grow if needed, avoids per-block allocation)
+	payloadsNeeded := numKeys * entrySize
+	if cap(b.payloadsBuf) < payloadsNeeded {
+		b.payloadsBuf = make([]byte, payloadsNeeded)
+	} else {
+		b.payloadsBuf = b.payloadsBuf[:payloadsNeeded]
+	}
+	metadataNeeded := b.estimateMetadataSize()
+	if cap(b.metadataBuf) < metadataNeeded {
+		b.metadataBuf = make([]byte, metadataNeeded)
+	} else {
+		b.metadataBuf = b.metadataBuf[:metadataNeeded]
+	}
 
-	// Build directly into mmap regions (no intermediate allocation)
-	metadataLen, _, builtNumKeys, err := b.builder.BuildSeparatedInto(metadataDst, payloadsDst)
+	metadataLen, _, builtNumKeys, err := b.builder.BuildSeparatedInto(b.metadataBuf, b.payloadsBuf)
 	if err != nil {
 		return err
 	}
 
-	// Update bookkeeping (no copy needed!)
-	b.iw.commitBlock(metadataLen, builtNumKeys)
-	return nil
+	return b.iw.commitBlockWithData(b.metadataBuf[:metadataLen], b.payloadsBuf, builtNumKeys)
 }
 
-// Close aborts the build and cleans up resources.
-// Call this if an error occurs during AddKey calls.
-// Safe to call after Finish() — ensures worker goroutines are shut down
-// even if Finish() returned an error.
-func (b *Builder) Close() error {
+// close aborts the sorted build and cleans up resources.
+func (b *builder) close() error {
 	if b.closed {
-		// Finish() was called but may have failed with workers still running.
-		// Shut them down if they haven't been already.
-		// cleanup() handles shutdown, but iw may already be closed — call
-		// shutdownWorkers directly for the post-Finish path.
 		b.shutdownWorkers()
 		return nil
 	}
 	b.closed = true
-
-	var errs []error
-
-	// Cleanup temp file if in unsorted mode
-	if b.unsortedBuf != nil {
-		if err := b.unsortedBuf.cleanup(); err != nil {
-			errs = append(errs, err)
-		}
-		b.unsortedBuf = nil
-	}
-
-	// cleanup() shuts down workers before unmapping iw.data
-	if err := b.cleanup(); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return b.cleanup()
 }
 
 // cleanup shuts down any running worker goroutines and removes the output file.
-// Workers must be stopped before unmapping iw.data, which they may still be
-// accessing via writePayloadsDirect.
-func (b *Builder) cleanup() error {
+// Workers must be stopped before closing the file, which they may still be
+// writing to via writePayloadsDirect.
+func (b *builder) cleanup() error {
 	b.shutdownWorkers()
 	return errors.Join(b.iw.close(), os.Remove(b.output))
+}
+
+// SortedBuilder builds an index from keys that arrive in block-sorted order.
+//
+// Usage:
+//
+//	builder, err := streamhash.NewSortedBuilder(ctx, "index.idx", totalKeys, opts...)
+//	if err != nil { return err }
+//	defer builder.Close()
+//
+//	for key, payload := range sortedData {
+//	    if err := builder.AddKey(key, payload); err != nil { return err }
+//	}
+//	return builder.Finish()
+type SortedBuilder struct {
+	b *builder
+}
+
+// NewSortedBuilder creates a builder for sorted input.
+// Keys must be added in block-sorted order via AddKey.
+// Use WithWorkers(N) to parallelize block building during Finish.
+func NewSortedBuilder(ctx context.Context, output string, totalKeys uint64, opts ...BuildOption) (*SortedBuilder, error) {
+	b, err := newBuilder(ctx, output, totalKeys, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if b.workers > 1 {
+		b.initParallelWorkers()
+		b.pendingEntries = b.getEntrySlice()
+	}
+	return &SortedBuilder{b: b}, nil
+}
+
+// AddKey adds a key-payload pair. Keys must be in block-sorted order.
+func (sb *SortedBuilder) AddKey(key []byte, payload uint64) error {
+	b := sb.b
+
+	if b.closed {
+		return sherr.ErrBuilderClosed
+	}
+
+	// Inline validation, context check, and routing for hot-path performance.
+	// Delegating to helper methods adds +23 instructions per key from wrapper
+	// overhead, lost bounds-check elimination, and error plumbing — measurable
+	// at 4B+ keys.
+	if len(key) > maxKeyLength {
+		return sherr.ErrKeyTooLong
+	}
+	if len(key) < MinKeySize {
+		return sherr.ErrKeyTooShort
+	}
+	if ps := b.cfg.payloadSize; ps > 0 && ps < 8 {
+		if payload > uint64(1)<<(ps*8)-1 {
+			return sherr.ErrPayloadOverflow
+		}
+	}
+
+	b.keyCounter++
+	if b.keyCounter >= contextCheckInterval {
+		if err := b.checkContextSlow(); err != nil {
+			return err
+		}
+	}
+
+	k0 := binary.LittleEndian.Uint64(key[0:8])
+	k1 := binary.LittleEndian.Uint64(key[8:16])
+	prefix := bits.ReverseBytes64(k0)
+	blockIdx := intbits.FastRange32(prefix, b.numBlocks)
+
+	if int64(blockIdx) < b.lastBlockID {
+		return sherr.ErrUnsortedInput
+	}
+	b.lastBlockID = int64(blockIdx)
+
+	var err error
+	if b.workers > 1 {
+		err = b.addKeyParallel(k0, k1, payload, blockIdx)
+	} else {
+		fingerprint := extractFingerprint(k0, k1, b.cfg.fingerprintSize)
+		err = b.addKeySingleThreaded(k0, k1, payload, fingerprint, blockIdx)
+	}
+	if err != nil {
+		return err
+	}
+	b.totalKeysAdded++
+	return nil
+}
+
+// Finish completes the index and writes it to disk.
+func (sb *SortedBuilder) Finish() error {
+	return sb.b.finishSorted()
+}
+
+// Close aborts the build and cleans up resources.
+// Safe to call after Finish.
+func (sb *SortedBuilder) Close() error {
+	return sb.b.close()
 }
 

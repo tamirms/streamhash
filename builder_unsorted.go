@@ -1,164 +1,200 @@
 package streamhash
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/bits"
 	"os"
 	"sync"
-	"syscall"
+	"sync/atomic"
 
+	"golang.org/x/sys/unix"
+
+	"github.com/tamirms/streamhash/internal/sherr"
 	intbits "github.com/tamirms/streamhash/internal/bits"
 )
 
+// Unsorted Build Architecture
+//
+// The unsorted builder constructs an index from keys arriving in arbitrary order.
+// It operates in two phases: a write phase that partitions keys to temp files,
+// and a read phase that reads them back in partition order to build blocks.
+//
+// WRITE PHASE (AddKey / AddKeys)
+//
+// Each key's prefix (first 8 bytes, big-endian) determines its block ID,
+// which maps to a partition (partition = blockID / blocksPerPart). The key
+// is appended to the writer's in-memory buffer — a single flat array holding
+// entries for all partitions, indexed by partition offset. Each writer has
+// two such arrays and alternates between them: one accumulates entries while
+// the other is flushed to disk in the background via pwrite. Each partition
+// has a pre-allocated region in the writer's temp file at offset P * regionSize.
+//
+// With concurrent writers (AddKeys), each writer has its own temp file and
+// its own buffers. Writers operate independently — zero synchronization
+// during ingestion. Block counts are accumulated per-writer during flush for
+// use in the read phase.
+//
+// READ PHASE (Finish)
+//
+// Three code paths depending on dataset size and worker count:
+//
+//  1. Fast path (finishUnsortedFastPath): If no data was flushed to disk,
+//     all entries are still in memory. Counting-sort by blockID and build
+//     blocks directly. No file I/O.
+//
+//  2. Single-threaded (finishUnsortedSingleThreaded, workers=1): Reads
+//     partitions sequentially with double-buffered read-ahead (read partition
+//     P+1 in background while building blocks from partition P). Builds
+//     blocks inline without worker goroutines.
+//
+//  3. Parallel (finishUnsortedParallel, workers>1): Multiple reader
+//     goroutines read partitions from temp files into pre-allocated read
+//     buffers. The main thread receives results and dispatches blocks to
+//     parallel workers (workChan → workers → resultChan → writer). Each
+//     reader owns a pair of dedicated read buffers and alternates between
+//     them, so disk reads can overlap with workers processing the previous
+//     partition's entries.
+//
+// PARALLEL READ PIPELINE (finishUnsortedParallel)
+//
+//     Reader goroutines          Main thread              Workers         Writer
+//     ─────────────────          ───────────              ───────         ──────
+//     wait for buffer ready      receive result           take work       take result
+//     read partition into buf    dispatch blocks           copy entries    write in order
+//     send result                mark buffer pending       signal done
+//                                signal buffer ready       build block
+//                                  (after workers done)    send result
+//
+// Each reader handles every Nth partition (reader r gets r, r+N, r+2N, ...).
+// The main thread consumes results in round-robin order (p % numReaders),
+// which matches the partition assignment, so results arrive in partition order.
+//
+// Buffer reuse protocol:
+//
+// Entries are dispatched to workers directly from the read buffer (no copy).
+// A WaitGroup ("fence") tracks how many workers are still reading from a
+// buffer. When a partition's blocks are dispatched, the main thread increments
+// the fence for each block. Workers decrement it after copying entries into
+// their block builder. A background goroutine waits for the fence to reach
+// zero, then signals the reader that the buffer is safe to reuse.
+//
+// This is deadlock-free because the dependency chain is acyclic: the reader
+// waits for a buffer to be ready, which requires workers to finish with
+// a previous partition's entries, which requires work that the main thread
+// already dispatched before reaching the current partition.
+
 const (
-	// maxFlushBufferBytes caps the flush buffer at 4MB. Smaller buffers have
-	// better cache behavior for addKey writes (~75MB buffer at 64MB exceeds L3,
-	// causing cache misses). Double-buffering fully hides flush I/O regardless
-	// of buffer size. Profiling shows 4MB is the sweet spot: fits in L3,
-	// ~100ms faster than 64MB at 50M keys, and ~180MB less peak heap.
-	maxFlushBufferBytes = 4 << 20
+	// overflowSigmas controls the safety margin for per-partition region sizing.
+	overflowSigmas = 8
 
-	// defaultUnsortedMemoryBudget is the default peak RAM budget for unsorted
-	// builds. Handles up to ~20B keys with P <= 5000.
-	defaultUnsortedMemoryBudget int64 = 256 << 20
+	// writerSkewMargin accounts for non-uniform key distribution across writers.
+	writerSkewMargin = 1.2
 
-	// readBufSize is the streaming read buffer size for partition files.
-	// 4MB provides good throughput without excess memory (benchmark #12).
-	readBufSize = 4 << 20
-
-	// bufferedEntrySize is the in-memory size of a bufferedEntry struct.
-	bufferedEntrySize = 24 // 3×uint64 (k0, k1, payload)
-
-	// maxPartitions limits the number of partition files to prevent fd exhaustion.
-	maxPartitions = 5000
-
-	// superblockSize is the number of blocks per superblock for readback grouping.
-	// S=500 is optimal for high block counts (50K-100K blocks/partition):
-	// cache-friendly per-SB sort with counts/offsets fitting in L1 cache (4KB each).
-	superblockSize = 500
-
-	// superblockMarginSigmas is the margin for Poisson overflow protection.
-	// 6-sigma gives P(overflow per SB) ~ exp(-18) ~ 1.5e-8 for large lambda.
-	superblockMarginSigmas = 6.0
-
-	// readCostPerEntry is the per-entry memory cost during the read phase.
-	// Derivation: routedEntry(24B) + blockID(4B) = 28B per entry, times 2
-	// for pipelining = 56B, times 1.03 superblock margin ≈ 58B.
-	readCostPerEntry = 58
-
-	// fdReserve is the number of file descriptors reserved for non-partition use
-	// (stdin/stdout/stderr, the output file, Go runtime internals, etc.).
-	fdReserve = 100
-
-	// blockContextCheckInterval is how often to check for context cancellation
-	// during block-level iteration in Finish.
-	blockContextCheckInterval = 64
+	// maxFlushBufferBytes is the target memory cap for each writer's flat buffer.
+	// Each bufferedEntry is 24 bytes (3×uint64), so 12 MB ≈ 524K entries.
+	maxFlushBufferBytes = 12 << 20
 )
 
 // bufferedEntry is the in-memory representation during the write phase.
-// blockID is computed transiently for partition routing, not stored.
-// Fingerprint is computed from k0/k1 at index-write time.
 type bufferedEntry struct {
 	k0, k1  uint64
 	payload uint64
 }
 
-// unsortedBuffer implements partition flush for unsorted mode.
-//
-// Write phase: entries are appended directly to per-partition buffers
-// (no sorting needed), then written sequentially to P partition files.
-// Partition files are opened at build start and immediately unlinked
-// (crash-safe: kernel frees data on process exit).
-//
-// Read phase: each partition file is streamed, entries scattered to
-// superblock regions in a flat buffer, then in-place per-superblock
-// counting sort groups entries by blockID.
-//
-// Total I/O: 2N (all sequential). Scales to hundreds of billions of keys.
+// unsortedBuffer holds the shared partition layout and per-writer files for unsorted mode.
+// Each writer has its own file for lock-free pwrite. Partitions are logical regions
+// within each writer file.
 type unsortedBuffer struct {
 	cfg       *buildConfig
 	numBlocks uint32
-	entrySize int // on-disk: minKeySize + payloadSize (no fingerprint)
+	entrySize int // on-disk bytes per entry: MinKeySize + payloadSize
 
 	// Partition layout
-	partDir          string     // temp directory (empty after files unlinked)
-	partFiles        []*os.File // persistent fds (nil'd after read+close)
 	numPartitions    int
 	blocksPerPart    int
-	blocksPerPartU32 uint32 // same as blocksPerPart, stored as uint32 for fast 32-bit division in addKey
+	blocksPerPartU32 uint32
 
-	// Write-phase double buffer (nil'd after prepareForRead).
-	// Two flat arrays, each divided into P regions. addKey writes to the
-	// active buffer; flush swaps buffers and writes the previous one in
-	// the background, overlapping I/O with the next batch of addKey calls.
-	flatBufs      [2][]bufferedEntry // two flat buffers for double-buffering
-	cursorSets    [2][]int           // per-partition cursors for each buffer
-	activeBuf     int                // 0 or 1: which buffer addKey writes to
-	regionCap     int                // entries per partition region (with headroom for hash variance)
-	totalBuffered int                // total entries in the active buffer
-	bufferCap     int                // flush threshold (= target entries before flush)
-	encodeBuf     []byte             // reused encode buffer (only used by flush goroutine)
-	flushWg       sync.WaitGroup     // waits for background flush to complete
-	flushErr      error              // error from background flush (read after Wait)
+	// Per-writer file state. Each writer has a single file containing all
+	// partition regions. Partition P is at offset P * regionSize.
+	numWriters    int        // total writer count (from config)
+	regionSize    int64      // bytes per partition region per writer file
+	writerFiles   []*os.File // [numWriters]
+	writerFds     []int      // [numWriters] fd cache for pwrite/pread
+	writerCursors [][]int64  // [numWriters][numPartitions] byte offset within region
+	nextWriterID  int        // next writerID to assign
+	writerMu      sync.Mutex // protects nextWriterID
 
-	// Read-phase pools (allocated in prepareForRead, reused across partitions)
-	readFlatBufs        [2][]routedEntry   // totalRegion each, alternated for pipelining
-	readBlockIDs        [2][]uint32        // totalRegion each, one per pipeline flatBuf
-	readScratch         []routedEntry      // max SB region size
-	readScratchIDs      []uint32           // max SB region size
-	readBlockEntries    [2][][]routedEntry // blocksPerPart each, one per pipeline flatBuf
-	readSBCursors       []int              // numSB
-	readSBCounts        []int              // S
-	readSBOffsets       []int              // S
-	readBuf             []byte             // readBufSize, reused across partitions
-	readSBRegionOffsets []int              // max numSB+1, reused across partitions
+	// Read-phase pipeline slots (allocated in prepareForRead)
+	readSlots []readSlot
 
-	flushed bool // true after first flush to disk
+	// Merged block counts from all writers, computed in finishUnsorted.
+	mergedBlockCounts [][]int // [numPartitions][blocksPerPart]
+
+	flushed atomic.Bool
 }
 
-// newUnsortedBuffer creates an unsortedBuffer with partition flush.
-func newUnsortedBuffer(cfg *buildConfig, numBlocks uint32) (*unsortedBuffer, error) {
-	entrySize := minKeySize + cfg.payloadSize
+// writerState holds per-writer flat double-buffered entries. Each writer owns
+// its buffers exclusively — zero synchronization during addKey. One buffer
+// accumulates entries while the other is flushed to disk in the background.
+type writerState struct {
+	u             *unsortedBuffer
+	writerID      int                // index into u.writerFiles/writerCursors
+	flatBufs      [2][]bufferedEntry // double buffer: [activeBuf][partition*regionCap+cursor]
+	cursorSets    [2][]int           // [activeBuf][numPartitions]
+	activeBuf     int                // index into flatBufs/cursorSets (0 or 1)
+	totalBuffered int                // total entries in the active buffer
+	bufferCap     int                // flush threshold (total entries)
+	regionCap     int                // entries per partition in each flat buffer
+	encodeBuf     []byte             // reused encode buffer
+	flushWg       sync.WaitGroup     // waits for background flush goroutine
+	flushErr      error              // error from background flush
+	blockCounts   [][]uint16         // [numPartitions][blocksPerPart] accumulated during flush
+}
 
-	memoryBudget := defaultUnsortedMemoryBudget
+// newUnsortedBuffer creates an unsortedBuffer with per-writer files.
+func newUnsortedBuffer(cfg *buildConfig, numBlocks uint32, numWriters int) (*unsortedBuffer, error) {
+	entrySize := MinKeySize + cfg.payloadSize
 
-	// Derive partition file target size from memory budget and read-phase cost.
-	partFileTarget := max(int64(memoryBudget)*int64(entrySize)/readCostPerEntry, 1)
+	numWriters = max(numWriters, 1)
 
-	totalDataSize := int64(cfg.totalKeys) * int64(entrySize)
-	numPartitions := max(int(math.Ceil(float64(totalDataSize)/float64(partFileTarget))), 1)
-
-	// Cap at fd limit
-	maxP := maxPartitions
-	var rlim syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim); err == nil {
-		fdLimit := int(rlim.Cur) - fdReserve
-		if fdLimit > 0 && fdLimit < maxP {
-			maxP = fdLimit
-		}
-	}
-	if numPartitions > maxP {
-		numPartitions = maxP
-	}
-	// Cannot have more partitions than blocks (each partition needs >= 1 block)
+	// Auto-compute partition count to minimize build time.
+	// Fewer partitions = larger flush batches = fewer pwrite/pread calls = faster.
+	// Optimal P is the smallest that keeps read-phase memory bounded.
+	//
+	// Two constraints determine P:
+	//   1. Flush efficiency floor: P ≤ maxFlushFloorPartitions (2,048).
+	//   2. Read memory cap: P ≥ numReadSlots×N×24/maxReadMem keeps read-phase flatBuf
+	//      memory bounded at 2 GB — reasonable for machines at scale.
+	//
+	// P = max(flushFloor, readBound). Below ~46B keys the flush floor binds
+	// (P=2,048, constant). Above, the read cap binds and P grows linearly.
+	const (
+		maxReadMem              = 2 << 30 // 2 GB cap for read-phase flatBuf memory
+		maxFlushFloorPartitions = 2048
+	)
+	numReadSlots := readPipelineDepth * slotsPerReader
+	readBound := int(math.Ceil(
+		float64(numReadSlots) * float64(cfg.totalKeys) * float64(readEntrySize) / float64(maxReadMem)))
+	numPartitions := max(max(maxFlushFloorPartitions, readBound), 1)
 	if numPartitions > int(numBlocks) {
 		numPartitions = int(numBlocks)
 	}
 
 	blocksPerPart := max(int(math.Ceil(float64(numBlocks)/float64(numPartitions))), 1)
 
-	// Derive flush buffer size
-	flushBufferBytes := max(min(memoryBudget/4, maxFlushBufferBytes), int64(bufferedEntrySize))
-	bufferCap := int(flushBufferBytes / bufferedEntrySize)
+	// Region sizing: 1.2× mean + 8σ per partition per writer.
+	meanEntries := float64(cfg.totalKeys) * float64(blocksPerPart) / float64(numBlocks) / float64(numWriters)
+	sigma := math.Sqrt(meanEntries)
+	maxRegionEntries := int64(math.Ceil(meanEntries*writerSkewMargin + overflowSigmas*sigma))
+	if maxRegionEntries < 1 {
+		maxRegionEntries = 1
+	}
+	regionSize := maxRegionEntries * int64(entrySize)
 
-	// Each partition region gets bufferCap/P + 12.5% headroom for hash variance.
-	regionCap := max(bufferCap/numPartitions+bufferCap/(numPartitions*8), 1)
-
-	flatSize := regionCap * numPartitions
 	u := &unsortedBuffer{
 		cfg:              cfg,
 		numBlocks:        numBlocks,
@@ -166,29 +202,26 @@ func newUnsortedBuffer(cfg *buildConfig, numBlocks uint32) (*unsortedBuffer, err
 		numPartitions:    numPartitions,
 		blocksPerPart:    blocksPerPart,
 		blocksPerPartU32: uint32(blocksPerPart),
-		bufferCap:        bufferCap,
-		regionCap:        regionCap,
-		flatBufs: [2][]bufferedEntry{
-			make([]bufferedEntry, flatSize),
-			make([]bufferedEntry, flatSize),
-		},
-		cursorSets: [2][]int{
-			make([]int, numPartitions),
-			make([]int, numPartitions),
-		},
+		numWriters:       numWriters,
+		regionSize:       regionSize,
+		writerFiles:      make([]*os.File, numWriters),
+		writerFds:        make([]int, numWriters),
+		writerCursors:    make([][]int64, numWriters),
+	}
+	for w := range numWriters {
+		u.writerCursors[w] = make([]int64, numPartitions)
 	}
 
-	// Create partition directory eagerly to validate the temp dir early.
-	if err := u.createPartDir(cfg.unsortedTempDir); err != nil {
-		return nil, fmt.Errorf("create partition directory: %w", err)
+	if err := u.createWriterFiles(cfg.unsortedTempDir); err != nil {
+		return nil, fmt.Errorf("create writer files: %w", err)
 	}
 
 	return u, nil
 }
 
-// createPartDir creates the temp directory and opens persistent partition file fds.
-// Files are immediately unlinked (crash-safe: kernel frees data on last fd close).
-func (u *unsortedBuffer) createPartDir(tempDir string) error {
+// createWriterFiles creates the temp directory and per-writer files.
+// Each writer gets a single file pre-allocated via fallocate.
+func (u *unsortedBuffer) createWriterFiles(tempDir string) error {
 	if tempDir == "" {
 		tempDir = os.TempDir()
 	}
@@ -196,106 +229,138 @@ func (u *unsortedBuffer) createPartDir(tempDir string) error {
 	if err != nil {
 		return err
 	}
-	u.partDir = dir
 
-	// Open all partition files and immediately unlink them.
-	u.partFiles = make([]*os.File, u.numPartitions)
-	for i := range u.partFiles {
-		path := fmt.Sprintf("%s/part-%05d", dir, i)
+	fileSize := u.regionSize * int64(u.numPartitions)
+	for w := range u.numWriters {
+		path := fmt.Sprintf("%s/writer-%03d", dir, w)
 		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
 		if err != nil {
-			u.closePartFiles(i)
+			u.closeWriterFiles()
 			os.RemoveAll(dir)
-			u.partDir = ""
-			return fmt.Errorf("create partition file %d: %w", i, err)
+			return fmt.Errorf("create writer %d: %w", w, err)
 		}
-		// Unlink immediately — data persists via fd. Near-crash-safe:
-		// non-zero window between OpenFile and Remove (microseconds).
+		if err := preallocFile(int(f.Fd()), fileSize); err != nil {
+			f.Close()
+			u.closeWriterFiles()
+			os.RemoveAll(dir)
+			return fmt.Errorf("fallocate writer %d (%d bytes): %w", w, fileSize, err)
+		}
 		if err := os.Remove(path); err != nil {
 			f.Close()
-			u.closePartFiles(i)
+			u.closeWriterFiles()
 			os.RemoveAll(dir)
-			u.partDir = ""
-			return fmt.Errorf("unlink partition file %d: %w", i, err)
+			return fmt.Errorf("unlink writer %d: %w", w, err)
 		}
-		u.partFiles[i] = f
+		u.writerFiles[w] = f
+		u.writerFds[w] = int(f.Fd())
 	}
+
+	// All files are unlinked — remove the now-empty temp directory.
+	os.Remove(dir)
 	return nil
 }
 
-// closePartFiles closes partition fds [0, n).
-func (u *unsortedBuffer) closePartFiles(n int) {
-	for _, f := range u.partFiles[:n] {
+// closeWriterFiles closes all open writer fds.
+func (u *unsortedBuffer) closeWriterFiles() {
+	for _, f := range u.writerFiles {
 		if f != nil {
 			f.Close()
 		}
 	}
 }
 
-// addKey writes an entry directly to the active buffer's partition region.
-// Returns true if the buffer is full and needs flushing. The caller must
-// call flush() when addKey returns true.
-func (u *unsortedBuffer) addKey(k0, k1 uint64, payload uint64, blockID uint32) bool {
-	// partitionID inlined. Uses uint32 division (DIVL) — 2-3x faster than int division.
-	p := int(blockID / u.blocksPerPartU32)
-	a := u.activeBuf
-	c := u.cursorSets[a][p]
-	if c >= u.regionCap {
-		// Partition region full due to hash skew; force flush before write.
-		return true
+// newWriterState creates per-writer flat double-buffered regions and assigns a writer file.
+func (u *unsortedBuffer) newWriterState() (*writerState, error) {
+	u.writerMu.Lock()
+	if u.nextWriterID >= u.numWriters {
+		u.writerMu.Unlock()
+		return nil, fmt.Errorf("all %d writer slots are assigned", u.numWriters)
 	}
-	u.flatBufs[a][p*u.regionCap+c] = bufferedEntry{k0: k0, k1: k1, payload: payload}
-	u.cursorSets[a][p] = c + 1
-	u.totalBuffered++
-	return u.totalBuffered >= u.bufferCap || c+1 >= u.regionCap
+	id := u.nextWriterID
+	u.nextWriterID++
+	u.writerMu.Unlock()
+
+	bufferCap := maxFlushBufferBytes / 24
+	regionCap := max(bufferCap/u.numPartitions+bufferCap/(u.numPartitions*8), 1)
+	flatSize := regionCap * u.numPartitions
+
+	blockCounts := make([][]uint16, u.numPartitions)
+	for i := range blockCounts {
+		blockCounts[i] = make([]uint16, u.blocksPerPart)
+	}
+	return &writerState{
+		u:          u,
+		writerID:   id,
+		flatBufs:   [2][]bufferedEntry{make([]bufferedEntry, flatSize), make([]bufferedEntry, flatSize)},
+		cursorSets: [2][]int{make([]int, u.numPartitions), make([]int, u.numPartitions)},
+		bufferCap:  bufferCap,
+		regionCap:  regionCap,
+		blockCounts: blockCounts,
+	}, nil
 }
 
-
-// flush swaps the active buffer and launches background I/O for the filled buffer.
-func (u *unsortedBuffer) flush() error {
-	if u.totalBuffered == 0 {
-		return nil
+// addKey routes an entry to this writer's flat buffer.
+// Zero synchronization — each writer owns its buffers exclusively.
+func (ws *writerState) addKey(k0, k1 uint64, payload uint64, blockID uint32) error {
+	p := int(blockID / ws.u.blocksPerPartU32)
+	a := ws.activeBuf
+	c := ws.cursorSets[a][p]
+	if c >= ws.regionCap {
+		if err := ws.flush(); err != nil {
+			return err
+		}
+		a = ws.activeBuf
+		c = ws.cursorSets[a][p]
 	}
-
-	// Wait for any previous background flush to complete.
-	u.flushWg.Wait()
-	if u.flushErr != nil {
-		return u.flushErr
+	ws.flatBufs[a][p*ws.regionCap+c] = bufferedEntry{k0: k0, k1: k1, payload: payload}
+	ws.cursorSets[a][p] = c + 1
+	ws.totalBuffered++
+	if ws.totalBuffered >= ws.bufferCap {
+		return ws.flush()
 	}
-
-	u.flushed = true
-
-	flushBuf := u.activeBuf
-	u.activeBuf = 1 - flushBuf
-	clear(u.cursorSets[u.activeBuf])
-	u.totalBuffered = 0
-
-	u.flushWg.Go(func() {
-		u.flushErr = u.doFlush(flushBuf)
-	})
-
 	return nil
 }
 
-// doFlush encodes and writes entries from the specified buffer to partition files.
-// Writes to persistent fds (file offset advances automatically via f.Write).
-func (u *unsortedBuffer) doFlush(bufIdx int) error {
-	cursors := u.cursorSets[bufIdx]
-	buf := u.flatBufs[bufIdx]
-
-	// Find max partition entry count for encode buffer sizing
-	maxCount := 0
-	for p := range u.numPartitions {
-		n := cursors[p]
-		if n > maxCount {
-			maxCount = n
-		}
+// flush swaps the active buffer and launches a background goroutine to encode
+// and pwrite the filled buffer to disk. Waits for any prior background flush first.
+func (ws *writerState) flush() error {
+	ws.flushWg.Wait()
+	if ws.flushErr != nil {
+		return ws.flushErr
 	}
 
-	encodeBufNeeded := maxCount * u.entrySize
-	if cap(u.encodeBuf) < encodeBufNeeded {
-		u.encodeBuf = make([]byte, encodeBufNeeded)
+	if ws.totalBuffered == 0 {
+		return nil
 	}
+
+	ws.u.flushed.Store(true)
+
+	// Swap buffers: the current active becomes the flush target.
+	flushBuf := ws.activeBuf
+	ws.activeBuf ^= 1
+	ws.totalBuffered = 0
+	// Clear cursors for the new active buffer.
+	clear(ws.cursorSets[ws.activeBuf])
+
+	ws.flushWg.Add(1)
+	go func() {
+		defer ws.flushWg.Done()
+		ws.flushErr = ws.doFlush(flushBuf)
+	}()
+	return nil
+}
+
+// doFlush encodes and pwrites all partitions from flatBufs[bufIdx] to the
+// writer's file. Also counts entries per block for read-phase scatter.
+func (ws *writerState) doFlush(bufIdx int) error {
+	u := ws.u
+	entrySize := u.entrySize
+	payloadSize := u.cfg.payloadSize
+	regionCap := ws.regionCap
+	cursors := ws.cursorSets[bufIdx]
+	flat := ws.flatBufs[bufIdx]
+	numBlocks := u.numBlocks
+	blocksPerPartU32 := u.blocksPerPartU32
 
 	for p := range u.numPartitions {
 		n := cursors[p]
@@ -303,676 +368,423 @@ func (u *unsortedBuffer) doFlush(bufIdx int) error {
 			continue
 		}
 
-		base := p * u.regionCap
-		encLen := u.encodeEntries(buf[base : base+n])
-
-		// Write to persistent fd (offset advances automatically)
-		f := u.partFiles[p]
-		if _, err := f.Write(u.encodeBuf[:encLen]); err != nil {
-			return fmt.Errorf("write partition %d: %w", p, err)
+		needed := n * entrySize
+		if len(ws.encodeBuf) < needed {
+			ws.encodeBuf = make([]byte, needed)
 		}
-	}
+		buf := ws.encodeBuf
 
+		// Encode entries and count per-block in a single pass.
+		base := p * regionCap
+		entries := flat[base : base+n]
+		bc := ws.blockCounts[p]
+		for i := range entries {
+			e := &entries[i]
+			pos := i * entrySize
+			binary.LittleEndian.PutUint64(buf[pos:], e.k0)
+			binary.LittleEndian.PutUint64(buf[pos+8:], e.k1)
+			if payloadSize > 0 {
+				packPayloadToBytes(buf[pos+MinKeySize:], e.payload, payloadSize)
+			}
+			prefix := bits.ReverseBytes64(e.k0)
+			localBlockIdx := intbits.FastRange32(prefix, numBlocks) - uint32(p)*blocksPerPartU32
+			bc[localBlockIdx]++
+		}
+
+		cursor := u.writerCursors[ws.writerID][p]
+		regionStart := int64(p) * u.regionSize
+		off := regionStart + cursor
+		if off+int64(needed) > regionStart+u.regionSize {
+			return fmt.Errorf("partition %d overflow in writer %d: region capacity exceeded", p, ws.writerID)
+		}
+
+		_, err := unix.Pwrite(u.writerFds[ws.writerID], buf[:needed], off)
+		if err != nil {
+			return fmt.Errorf("pwrite partition %d writer %d: %w", p, ws.writerID, err)
+		}
+
+		u.writerCursors[ws.writerID][p] = cursor + int64(needed)
+	}
 	return nil
 }
 
-// encodeEntries encodes a slice of bufferedEntries into u.encodeBuf.
-// On-disk format per entry: k0(8) + k1(8) + payload(payloadSize).
-// No fingerprint on disk (computed from k0/k1 at index-write time).
-func (u *unsortedBuffer) encodeEntries(entries []bufferedEntry) int {
-	buf := u.encodeBuf
-	pos := 0
-	payloadSize := u.cfg.payloadSize
-
-	for i := range entries {
-		e := &entries[i]
-		binary.LittleEndian.PutUint64(buf[pos:], e.k0)
-		binary.LittleEndian.PutUint64(buf[pos+8:], e.k1)
-		if payloadSize > 0 {
-			packPayloadToBytes(buf[pos+minKeySize:], e.payload, payloadSize)
-		}
-		pos += u.entrySize
+// flushAll waits for any background flush, then synchronously flushes the
+// remaining active buffer.
+func (ws *writerState) flushAll() error {
+	// Wait for any in-progress background flush.
+	ws.flushWg.Wait()
+	if ws.flushErr != nil {
+		return ws.flushErr
 	}
-	return pos
+
+	if ws.totalBuffered == 0 {
+		return nil
+	}
+
+	ws.u.flushed.Store(true)
+
+	// Synchronously flush the active buffer (no swap needed).
+	return ws.doFlush(ws.activeBuf)
 }
 
-// computeSBRegions computes the total region size and max individual SB region
-// for a given entry count and block count, using superblock margin allocation.
-// If offsets is non-nil (len >= numSB+1), it is filled with cumulative region offsets.
-func computeSBRegions(totalEntries, localBlocks, S int, offsets []int) (totalRegion, maxSBRegion int) {
-	numSB := (localBlocks + S - 1) / S
-	if len(offsets) > 0 {
-		offsets[0] = 0
-	}
-	for sb := range numSB {
-		blocksInSB := min(S, localBlocks-sb*S)
-		expected := (totalEntries*blocksInSB + localBlocks - 1) / localBlocks
-		margin := int(superblockMarginSigmas * math.Sqrt(float64(expected)))
-		region := expected + margin
-		totalRegion += region
-		if region > maxSBRegion {
-			maxSBRegion = region
-		}
-		if len(offsets) > sb+1 {
-			offsets[sb+1] = totalRegion
-		}
-	}
-	return
+// free releases the writer's flat buffer memory.
+// blockCounts are preserved for merging in finishUnsorted.
+func (ws *writerState) free() {
+	ws.flatBufs = [2][]bufferedEntry{}
+	ws.cursorSets = [2][]int{}
+	ws.encodeBuf = nil
 }
 
-// sortSuperblock performs in-place counting sort for a single superblock.
-// Each SB is independent, enabling parallel sorting across goroutines.
-func sortSuperblock(sb, S, localBlocks int, sbRegionOffsets, sbCursors []int,
-	flatBuf []routedEntry, blockIDs []uint32, blockEntries [][]routedEntry,
-	scratch []routedEntry, scratchIDs []uint32, sbCounts, sbOffsets []int) {
-
-	sbStart := sbRegionOffsets[sb]
-	sbN := sbCursors[sb]
-	blocksInSB := min(S, localBlocks-sb*S)
-
-	// Copy to scratch
-	copy(scratch[:sbN], flatBuf[sbStart:sbStart+sbN])
-	copy(scratchIDs[:sbN], blockIDs[sbStart:sbStart+sbN])
-
-	// Count by blockID within SB
-	clear(sbCounts[:blocksInSB])
-	for i := range sbN {
-		sbCounts[scratchIDs[i]-uint32(sb*S)]++
-	}
-
-	// Prefix sum -> offsets within flatBuf
-	sbOffsets[0] = sbStart
-	for j := 1; j < blocksInSB; j++ {
-		sbOffsets[j] = sbOffsets[j-1] + sbCounts[j-1]
-	}
-
-	// Build result slices BEFORE scatter (offsets are correct positions)
-	for j := range blocksInSB {
-		blockEntries[sb*S+j] = flatBuf[sbOffsets[j] : sbOffsets[j]+sbCounts[j]]
-	}
-
-	// Scatter from scratch -> flatBuf (sorted by block within SB)
-	for i := range sbN {
-		localInSB := scratchIDs[i] - uint32(sb*S)
-		flatBuf[sbOffsets[localInSB]] = scratch[i]
-		sbOffsets[localInSB]++
-	}
+// freeBlockCounts releases the block count memory after merging.
+func (ws *writerState) freeBlockCounts() {
+	ws.blockCounts = nil
 }
 
-// readPartition reads a partition file and returns entries grouped by block.
-// Uses superblock scatter + in-place per-SB counting sort.
-// The pipelineIdx (0 or 1) selects which pipeline buffer set to use.
-func (u *unsortedBuffer) readPartition(p, pipelineIdx int, flatBuf []routedEntry, blockIDs []uint32) ([][]routedEntry, error) {
-	partStartBlock := p * u.blocksPerPart
-	partEndBlock := min(partStartBlock+u.blocksPerPart, int(u.numBlocks))
-	localBlocks := partEndBlock - partStartBlock
-	if localBlocks <= 0 {
-		return nil, nil
+// unsortedWriter is a concurrent writer for unsorted mode.
+// Each writer has private per-partition regions — zero synchronization during addKey.
+type unsortedWriter struct {
+	b          *builder
+	ws         *writerState
+	keysAdded  uint64
+	keyCounter int
+	closed     bool
+}
+
+// addKey adds a key-payload pair via this writer.
+func (w *unsortedWriter) addKey(key []byte, payload uint64) error {
+	if err := w.b.validateKey(key, payload); err != nil {
+		return err
 	}
 
-	f := u.partFiles[p]
-	if f == nil {
-		return make([][]routedEntry, localBlocks), nil
+	w.keyCounter++
+	if w.keyCounter >= contextCheckInterval {
+		w.keyCounter = 0
+		select {
+		case <-w.b.ctx.Done():
+			return w.b.ctx.Err()
+		default:
+		}
 	}
 
-	fi, err := f.Stat()
+	k0 := binary.LittleEndian.Uint64(key[0:8])
+	k1 := binary.LittleEndian.Uint64(key[8:16])
+	prefix := bits.ReverseBytes64(k0)
+	blockIdx := intbits.FastRange32(prefix, w.b.numBlocks)
+
+	if err := w.ws.addKey(k0, k1, payload, blockIdx); err != nil {
+		return err
+	}
+	w.keysAdded++
+	return nil
+}
+
+// close flushes remaining entries and releases writer memory.
+func (w *unsortedWriter) close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if err := w.ws.flushAll(); err != nil {
+		return err
+	}
+	w.ws.free()
+	return nil
+}
+
+// UnsortedBuilder builds an index from keys in arbitrary order.
+// Keys are buffered to per-writer temp files, partitioned, and built during Finish.
+//
+// Two ingestion modes (mutually exclusive):
+//   - AddKey: single-threaded sequential addition, then call Finish
+//   - AddKeys: concurrent multi-writer callback, calls Finish internally
+//
+// Usage (single-threaded):
+//
+//	builder, _ := streamhash.NewUnsortedBuilder(ctx, path, totalKeys, tempDir, opts...)
+//	defer builder.Close()
+//	for key, payload := range data {
+//	    builder.AddKey(key, payload)
+//	}
+//	return builder.Finish()
+//
+// Usage (concurrent):
+//
+//	builder, _ := streamhash.NewUnsortedBuilder(ctx, path, totalKeys, tempDir, opts...)
+//	defer builder.Close()
+//	return builder.AddKeys(8, func(writerID int, addKey func([]byte, uint64) error) error {
+//	    for key, payload := range myPartition(writerID) {
+//	        if err := addKey(key, payload); err != nil { return err }
+//	    }
+//	    return nil
+//	})
+type UnsortedBuilder struct {
+	b           *builder
+	addKeyUsed  bool
+	addKeysUsed bool
+	initialized bool // true after unsortedBuffer is created
+
+	// Unsorted-specific state (owned by UnsortedBuilder, not shared builder core)
+	unsortedBuf     *unsortedBuffer
+	defaultWriterWS *writerState // default writer for single-threaded AddKey
+
+	// Concurrent writers
+	writersMu sync.Mutex
+	writers   []*unsortedWriter
+}
+
+// NewUnsortedBuilder creates a builder for unsorted input.
+// Keys can be added in any order via AddKey or AddKeys.
+//
+// tempDir specifies where partition files are created. Pass "" to use the
+// system default (os.TempDir). The directory must exist and be on a local
+// filesystem (ext4, xfs, btrfs). NFS is not supported. tmpfs works but is
+// not recommended at scale since it stores data in RAM/swap.
+//
+// Use WithWorkers(N) to parallelize block building during Finish.
+func NewUnsortedBuilder(ctx context.Context, output string, totalKeys uint64, tempDir string, opts ...BuildOption) (*UnsortedBuilder, error) {
+	b, err := newBuilder(ctx, output, totalKeys, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("stat partition %d: %w", p, err)
+		return nil, err
 	}
-	fileSize := fi.Size()
-	if fileSize == 0 {
-		f.Close()
-		u.partFiles[p] = nil
-		return make([][]routedEntry, localBlocks), nil
+	b.cfg.unsortedTempDir = tempDir
+	// Validate temp dir eagerly so invalid configs fail at constructor time.
+	dir := tempDir
+	if dir == "" {
+		dir = os.TempDir()
 	}
-
-	totalEntries := int(fileSize) / u.entrySize
-	if int64(totalEntries)*int64(u.entrySize) != fileSize {
-		return nil, fmt.Errorf("partition %d: file size %d not a multiple of entry size %d", p, fileSize, u.entrySize)
+	if info, err := os.Stat(dir); err != nil {
+		return nil, errors.Join(fmt.Errorf("temp dir: %w", err), b.iw.close(), os.Remove(output))
+	} else if !info.IsDir() {
+		return nil, errors.Join(fmt.Errorf("temp dir %q is not a directory", dir), b.iw.close(), os.Remove(output))
 	}
-
-	// Seek to beginning for reading
-	if _, err := f.Seek(0, 0); err != nil {
-		return nil, fmt.Errorf("seek partition %d: %w", p, err)
-	}
-
-	// Per-SB proportional region allocation
-	S := superblockSize
-	numSB := (localBlocks + S - 1) / S
-	sbRegionOffsets := u.readSBRegionOffsets[:numSB+1]
-	totalRegion, _ := computeSBRegions(totalEntries, localBlocks, S, sbRegionOffsets)
-
-	if len(flatBuf) < totalRegion || len(blockIDs) < totalRegion {
-		return nil, fmt.Errorf("flatBuf/blockIDs too small: have %d/%d, need %d", len(flatBuf), len(blockIDs), totalRegion)
-	}
-
-	sbCursors := u.readSBCursors[:numSB]
-	clear(sbCursors)
-
-	// Single pass: decode file -> scatter to SB regions in flatBuf.
-	// Leftover bytes from partial entries are kept at the start of readBuf
-	// to avoid per-read allocations from append.
-	readBuf := u.readBuf
-	payloadSize := u.cfg.payloadSize
-	entrySize := u.entrySize
-	leftoverN := 0 // number of leftover bytes at start of readBuf
-
-	for {
-		nr, readErr := f.Read(readBuf[leftoverN:])
-		if nr == 0 && readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			return nil, fmt.Errorf("read partition %d: %w", p, readErr)
-		}
-
-		data := readBuf[:leftoverN+nr]
-		leftoverN = 0
-
-		for len(data) >= entrySize {
-			k0 := binary.LittleEndian.Uint64(data[0:8])
-			k1 := binary.LittleEndian.Uint64(data[8:16])
-			var payload uint64
-			if payloadSize > 0 {
-				payload = unpackPayloadFromBytes(data[minKeySize:], payloadSize)
-			}
-
-			prefix := bits.ReverseBytes64(k0)
-			globalBlockID := int(intbits.FastRange32(prefix, u.numBlocks))
-
-			if globalBlockID < partStartBlock || globalBlockID >= partEndBlock {
-				return nil, fmt.Errorf("partition %d: blockID %d outside range [%d, %d)",
-					p, globalBlockID, partStartBlock, partEndBlock)
-			}
-
-			localIdx := globalBlockID - partStartBlock
-			sb := localIdx / S
-
-			cursor := sbCursors[sb]
-			regionCap := sbRegionOffsets[sb+1] - sbRegionOffsets[sb]
-			if cursor >= regionCap {
-				return nil, fmt.Errorf("superblock %d overflow: non-uniform input", sb)
-			}
-
-			pos := sbRegionOffsets[sb] + cursor
-			flatBuf[pos] = routedEntry{k0: k0, k1: k1, payload: payload}
-			blockIDs[pos] = uint32(localIdx)
-			sbCursors[sb] = cursor + 1
-
-			data = data[entrySize:]
-		}
-
-		if len(data) > 0 {
-			leftoverN = copy(readBuf, data)
-		}
-
-		if readErr != nil {
-			if readErr != io.EOF {
-				return nil, fmt.Errorf("read partition %d: %w", p, readErr)
-			}
-			break
-		}
-	}
-
-	// In-place per-SB counting sort using scratch buffer
-	scratch := u.readScratch
-	scratchIDs := u.readScratchIDs
-	sbCounts := u.readSBCounts[:S]
-	sbOffsets := u.readSBOffsets[:S]
-	blockEntries := u.readBlockEntries[pipelineIdx][:localBlocks]
-
-	for sb := range numSB {
-		sortSuperblock(sb, S, localBlocks, sbRegionOffsets, sbCursors,
-			flatBuf, blockIDs, blockEntries, scratch, scratchIDs, sbCounts, sbOffsets)
-	}
-
-	// Close fd (file already unlinked, kernel frees pages on last fd close).
-	f.Close()
-	u.partFiles[p] = nil
-
-	return blockEntries, nil
+	return &UnsortedBuilder{b: b}, nil
 }
 
-// maxPartitionEntries returns the maximum entry count across all partitions,
-// computed by statting the persistent fds.
-func (u *unsortedBuffer) maxPartitionEntries() (int, error) {
-	maxEntries := 0
-	for _, f := range u.partFiles {
-		if f == nil {
-			continue
-		}
-		fi, err := f.Stat()
+// initBuffer lazily creates the unsorted buffer with the given writer count.
+func (ub *UnsortedBuilder) initBuffer(numWriters int) error {
+	if ub.initialized {
+		return nil
+	}
+
+	buf, err := newUnsortedBuffer(ub.b.cfg, ub.b.numBlocks, numWriters)
+	if err != nil {
+		return fmt.Errorf("init unsorted mode: %w", err)
+	}
+	ub.unsortedBuf = buf
+
+	if numWriters <= 1 {
+		ws, err := buf.newWriterState()
 		if err != nil {
-			return 0, fmt.Errorf("stat partition file: %w", err)
+			return errors.Join(fmt.Errorf("init default writer: %w", err), buf.cleanup())
 		}
-		n := int(fi.Size()) / u.entrySize
-		if n > maxEntries {
-			maxEntries = n
-		}
+		ub.defaultWriterWS = ws
 	}
-	return maxEntries, nil
+	ub.initialized = true
+	return nil
 }
 
-// prepareForRead flushes remaining entries, nils write-phase buffers,
-// and pre-allocates read-phase pools.
-func (u *unsortedBuffer) prepareForRead() error {
-	if u.totalBuffered > 0 {
-		if err := u.flush(); err != nil {
+// AddKey adds a key-payload pair. Keys can be in any order.
+// Cannot be used after AddKeys has been called.
+func (ub *UnsortedBuilder) AddKey(key []byte, payload uint64) error {
+	b := ub.b
+
+	if !ub.initialized {
+		return ub.addKeyFirstCall(key, payload)
+	}
+
+	if b.closed {
+		return sherr.ErrBuilderClosed
+	}
+
+	// Inline validation for hot-path performance.
+	if len(key) > maxKeyLength {
+		return sherr.ErrKeyTooLong
+	}
+	if len(key) < MinKeySize {
+		return sherr.ErrKeyTooShort
+	}
+	if ps := b.cfg.payloadSize; ps > 0 && ps < 8 {
+		if payload > uint64(1)<<(ps*8)-1 {
+			return sherr.ErrPayloadOverflow
+		}
+	}
+
+	b.keyCounter++
+	if b.keyCounter >= contextCheckInterval {
+		b.keyCounter = 0
+		select {
+		case <-b.ctx.Done():
+			return b.ctx.Err()
+		default:
+		}
+	}
+
+	k0 := binary.LittleEndian.Uint64(key[0:8])
+	k1 := binary.LittleEndian.Uint64(key[8:16])
+	prefix := bits.ReverseBytes64(k0)
+	blockIdx := intbits.FastRange32(prefix, b.numBlocks)
+
+	// Inline writerState.addKey for hot-path performance.
+	ws := ub.defaultWriterWS
+	p := int(blockIdx / ws.u.blocksPerPartU32)
+	a := ws.activeBuf
+	c := ws.cursorSets[a][p]
+	if c >= ws.regionCap {
+		if err := ws.flush(); err != nil {
+			return err
+		}
+		a = ws.activeBuf
+		c = ws.cursorSets[a][p]
+	}
+	ws.flatBufs[a][p*ws.regionCap+c] = bufferedEntry{k0: k0, k1: k1, payload: payload}
+	ws.cursorSets[a][p] = c + 1
+	ws.totalBuffered++
+	if ws.totalBuffered >= ws.bufferCap {
+		if err := ws.flush(); err != nil {
 			return err
 		}
 	}
-	u.flushWg.Wait()
-	if u.flushErr != nil {
-		return u.flushErr
-	}
-	// Free write-phase allocations
-	u.flatBufs = [2][]bufferedEntry{}
-	u.cursorSets = [2][]int{}
-	u.encodeBuf = nil
+	b.totalKeysAdded++
+	return nil
+}
 
-	// Pre-allocate read-phase pools
-	maxEntries, err := u.maxPartitionEntries()
-	if err != nil {
+// addKeyFirstCall handles the first AddKey call — validates mode, initializes buffer,
+// then delegates to the fast path. Kept out of AddKey to keep the hot path function small.
+func (ub *UnsortedBuilder) addKeyFirstCall(key []byte, payload uint64) error {
+	b := ub.b
+	if b.closed {
+		return sherr.ErrBuilderClosed
+	}
+	if ub.addKeysUsed {
+		return fmt.Errorf("AddKey and AddKeys are mutually exclusive; AddKeys was already called")
+	}
+	ub.addKeyUsed = true
+
+	if err := ub.initBuffer(1); err != nil {
+		return errors.Join(err, b.cleanup())
+	}
+
+	return ub.AddKey(key, payload)
+}
+
+// AddKeys ingests keys in parallel using numWriters concurrent writers.
+// The callback fn is invoked once per writer in its own goroutine.
+// Each invocation receives a writerID (0-based) and an addKey function.
+// AddKeys calls Finish internally — do not call Finish separately.
+//
+// Cannot be used after AddKey has been called.
+//
+// Example:
+//
+//	err := builder.AddKeys(8, func(writerID int, addKey func([]byte, uint64) error) error {
+//	    for key, payload := range myPartition(writerID) {
+//	        if err := addKey(key, payload); err != nil { return err }
+//	    }
+//	    return nil
+//	})
+func (ub *UnsortedBuilder) AddKeys(numWriters int, fn func(writerID int, addKey func(key []byte, payload uint64) error) error) error {
+	if ub.b.closed {
+		return sherr.ErrBuilderClosed
+	}
+	if ub.addKeyUsed {
+		return fmt.Errorf("AddKey and AddKeys are mutually exclusive; AddKey was already called")
+	}
+	ub.addKeysUsed = true
+
+	if numWriters < 1 {
+		return fmt.Errorf("AddKeys: numWriters must be >= 1, got %d", numWriters)
+	}
+
+	if err := ub.initBuffer(numWriters); err != nil {
+		ub.b.cleanup()
 		return err
 	}
-	if maxEntries == 0 {
+
+	// Create all writers before launching goroutines.
+	writers := make([]*unsortedWriter, numWriters)
+	for i := range numWriters {
+		ws, err := ub.unsortedBuf.newWriterState()
+		if err != nil {
+			ub.Close()
+			return fmt.Errorf("new writer: %w", err)
+		}
+		w := &unsortedWriter{b: ub.b, ws: ws}
+		ub.writersMu.Lock()
+		ub.writers = append(ub.writers, w)
+		ub.writersMu.Unlock()
+		writers[i] = w
+	}
+
+	// Run writers concurrently.
+	var wg sync.WaitGroup
+	errs := make([]error, numWriters)
+	for i := range numWriters {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			w := writers[writerID]
+			errs[writerID] = fn(writerID, w.addKey)
+			if closeErr := w.close(); closeErr != nil && errs[writerID] == nil {
+				errs[writerID] = closeErr
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if err := errors.Join(errs...); err != nil {
+		ub.Close()
+		return err
+	}
+
+	return ub.Finish()
+}
+
+// Finish completes the index. Called automatically by AddKeys.
+// Only call this directly when using AddKey (not AddKeys).
+func (ub *UnsortedBuilder) Finish() error {
+	b := ub.b
+	if b.closed {
+		return sherr.ErrBuilderClosed
+	}
+	b.closed = true
+
+	// Sum key counts from all writers.
+	totalKeys := b.totalKeysAdded
+	for _, w := range ub.writers {
+		totalKeys += w.keysAdded
+	}
+
+	if totalKeys != b.cfg.totalKeys {
+		primaryErr := fmt.Errorf("%w: expected %d, got %d", sherr.ErrKeyCountMismatch, b.cfg.totalKeys, totalKeys)
+		return errors.Join(primaryErr, ub.cleanupAll())
+	}
+
+	return ub.finishUnsorted()
+}
+
+// Close aborts the build and cleans up resources. Safe to call after Finish.
+func (ub *UnsortedBuilder) Close() error {
+	b := ub.b
+	if b.closed {
+		b.shutdownWorkers()
 		return nil
 	}
-
-	// Compute totalRegion and maxSBRegion as max over both blocksPerPart
-	// and the last partition's actual block count.
-	totalRegion1, maxSBRegion1 := computeSBRegions(maxEntries, u.blocksPerPart, superblockSize, nil)
-	lastPartBlocks := int(u.numBlocks) - (u.numPartitions-1)*u.blocksPerPart
-	totalRegion2, maxSBRegion2 := computeSBRegions(maxEntries, lastPartBlocks, superblockSize, nil)
-	totalRegion := max(totalRegion1, totalRegion2)
-	maxSBRegion := max(maxSBRegion1, maxSBRegion2)
-
-	u.readFlatBufs = [2][]routedEntry{
-		make([]routedEntry, totalRegion),
-		make([]routedEntry, totalRegion),
-	}
-	u.readBlockIDs = [2][]uint32{
-		make([]uint32, totalRegion),
-		make([]uint32, totalRegion),
-	}
-	u.readScratch = make([]routedEntry, maxSBRegion)
-	u.readScratchIDs = make([]uint32, maxSBRegion)
-
-	maxBlocksPerPart := u.blocksPerPart
-	u.readBlockEntries = [2][][]routedEntry{
-		make([][]routedEntry, maxBlocksPerPart),
-		make([][]routedEntry, maxBlocksPerPart),
-	}
-
-	numSB := (u.blocksPerPart + superblockSize - 1) / superblockSize
-	u.readSBCursors = make([]int, numSB)
-	u.readSBCounts = make([]int, superblockSize)
-	u.readSBOffsets = make([]int, superblockSize)
-	u.readBuf = make([]byte, readBufSize)
-	u.readSBRegionOffsets = make([]int, numSB+1)
-
-	return nil
+	b.closed = true
+	return ub.cleanupAll()
 }
 
-// cleanup closes all remaining partition fds and removes temp directory. Idempotent.
-func (u *unsortedBuffer) cleanup() error {
-	// Wait for any background flush to complete before closing fds
-	u.flushWg.Wait()
-
-	// Close any remaining non-nil fds
-	for i, f := range u.partFiles {
-		if f != nil {
-			f.Close()
-			u.partFiles[i] = nil
+// cleanupAll cleans up both unsorted buffer and core builder resources.
+func (ub *UnsortedBuilder) cleanupAll() error {
+	var errs []error
+	if ub.unsortedBuf != nil {
+		if err := ub.unsortedBuf.cleanup(); err != nil {
+			errs = append(errs, err)
 		}
+		ub.unsortedBuf = nil
 	}
-
-	// Remove temp directory (now empty since files were unlinked)
-	if u.partDir != "" {
-		err := os.RemoveAll(u.partDir)
-		u.partDir = ""
-		u.partFiles = nil
-		u.flatBufs = [2][]bufferedEntry{}
-		u.cursorSets = [2][]int{}
-		u.encodeBuf = nil
-		if err != nil {
-			return fmt.Errorf("remove partition directory: %w", err)
-		}
+	if err := ub.b.cleanup(); err != nil {
+		errs = append(errs, err)
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
-// finishUnsorted builds blocks from partition files.
-// Correctness is validated by TestBuildModeEquivalence.
-func (b *Builder) finishUnsorted() error {
-	u := b.unsortedBuf
-
-	// Fast path: if all entries are still in buffer (never flushed to disk),
-	// sort in-memory and build blocks directly without file I/O.
-	if !u.flushed {
-		return b.finishUnsortedFastPath()
-	}
-
-	// Normal path: flush remaining entries, free write-phase buffers.
-	if err := u.prepareForRead(); err != nil {
-		return errors.Join(err, u.cleanup(), b.cleanup())
-	}
-
-	if b.workers > 1 {
-		return b.finishUnsortedParallel()
-	}
-	return b.finishUnsortedSingleThreaded()
-}
-
-// finishUnsortedFastPath handles small datasets that fit entirely in memory.
-// The buffer was never flushed to disk, so we sort by blockID and build directly.
-func (b *Builder) finishUnsortedFastPath() error {
-	u := b.unsortedBuf
-
-	// Collect all entries from the active buffer's partition regions
-	// and compute blockIDs.
-	a := u.activeBuf
-	entries := make([]routedEntry, 0, u.totalBuffered)
-	entryBlockIDs := make([]uint32, 0, u.totalBuffered)
-	for p := range u.numPartitions {
-		n := u.cursorSets[a][p]
-		if n > 0 {
-			base := p * u.regionCap
-			for i := range n {
-				e := u.flatBufs[a][base+i]
-				entries = append(entries, routedEntry{k0: e.k0, k1: e.k1, payload: e.payload})
-				prefix := bits.ReverseBytes64(e.k0)
-				entryBlockIDs = append(entryBlockIDs, intbits.FastRange32(prefix, u.numBlocks))
-			}
-		}
-	}
-
-	// Check context before doing any work
-	select {
-	case <-b.ctx.Done():
-		return errors.Join(b.ctx.Err(), u.cleanup(), b.cleanup())
-	default:
-	}
-
-	// Counting sort by blockID
-	numBlocks := int(u.numBlocks)
-	counts := make([]int, numBlocks)
-	for _, bid := range entryBlockIDs {
-		counts[bid]++
-	}
-	offsets := make([]int, numBlocks)
-	for i := 1; i < numBlocks; i++ {
-		offsets[i] = offsets[i-1] + counts[i-1]
-	}
-	sorted := make([]routedEntry, len(entries))
-	cursors := make([]int, numBlocks)
-	copy(cursors, offsets)
-	for i, e := range entries {
-		bid := entryBlockIDs[i]
-		sorted[cursors[bid]] = e
-		cursors[bid]++
-	}
-
-	if b.workers > 1 {
-		b.initParallelWorkers()
-	}
-
-	fpSize := b.cfg.fingerprintSize
-	for blockID := uint32(0); blockID < u.numBlocks; blockID++ {
-		// Periodic context check
-		if blockID%blockContextCheckInterval == 0 {
-			select {
-			case <-b.ctx.Done():
-				return errors.Join(b.ctx.Err(), u.cleanup(), b.cleanup())
-			default:
-			}
-		}
-
-		start := offsets[blockID]
-		n := counts[blockID]
-
-		if n == 0 {
-			if b.workers > 1 {
-				if err := b.dispatchEmptyBlock(blockID); err != nil {
-					return errors.Join(err, u.cleanup(), b.cleanup())
-				}
-			} else {
-				b.commitEmptyBlock()
-			}
-			continue
-		}
-
-		blockEntries := sorted[start : start+n]
-		if b.workers > 1 {
-			// Fresh allocation, not from pool or flatBuf
-			dst := make([]routedEntry, n)
-			copy(dst, blockEntries)
-			if err := b.dispatchBlockWork(blockID, dst, false); err != nil {
-				return errors.Join(err, u.cleanup(), b.cleanup())
-			}
-		} else {
-			b.builder.Reset()
-			for _, e := range blockEntries {
-				b.builder.AddKey(e.k0, e.k1, e.payload, extractFingerprint(e.k0, e.k1, fpSize))
-			}
-			if err := b.buildBlockZeroCopy(); err != nil {
-				return errors.Join(err, u.cleanup(), b.cleanup())
-			}
-		}
-	}
-
-	if err := u.cleanup(); err != nil {
-		return errors.Join(err, b.cleanup())
-	}
-	b.unsortedBuf = nil
-
-	if b.workers > 1 {
-		return b.drainParallelPipeline()
-	}
-	return b.iw.finalize()
-}
-
-// finishUnsortedSingleThreaded reads partitions sequentially and builds blocks.
-// Uses pipelined partition processing: reads partition P+1 in background
-// while building blocks from partition P (benchmark #10: 11%+ gain).
-func (b *Builder) finishUnsortedSingleThreaded() error {
-	u := b.unsortedBuf
-	numParts := u.numPartitions
-	fpSize := b.cfg.fingerprintSize
-
-	type readResult struct {
-		entries [][]routedEntry
-		err     error
-	}
-
-	var nextResult *readResult
-
-	// Start reading partition 0
-	if numParts > 0 {
-		entries, err := u.readPartition(0, 0, u.readFlatBufs[0], u.readBlockIDs[0])
-		nextResult = &readResult{entries, err}
-	}
-
-	for p := range numParts {
-		currentResult := nextResult
-		if currentResult.err != nil {
-			return errors.Join(currentResult.err, u.cleanup(), b.cleanup())
-		}
-
-		// Start reading next partition in background (pipelining).
-		var wg sync.WaitGroup
-		if p+1 < numParts {
-			nextResult = &readResult{}
-			wg.Add(1)
-			result := nextResult
-			nextPart := p + 1
-			nextPIdx := nextPart % 2
-			go func() {
-				defer wg.Done()
-				result.entries, result.err = u.readPartition(nextPart, nextPIdx, u.readFlatBufs[nextPIdx], u.readBlockIDs[nextPIdx])
-			}()
-		}
-
-		// Process current partition: build blocks in ascending order
-		partStartBlock := uint32(p * u.blocksPerPart)
-		for localIdx, entries := range currentResult.entries {
-			blockID := partStartBlock + uint32(localIdx)
-
-			if blockID%blockContextCheckInterval == 0 {
-				select {
-				case <-b.ctx.Done():
-					wg.Wait()
-					return errors.Join(b.ctx.Err(), u.cleanup(), b.cleanup())
-				default:
-				}
-			}
-
-			if len(entries) == 0 {
-				b.commitEmptyBlock()
-				continue
-			}
-			b.builder.Reset()
-			for _, e := range entries {
-				b.builder.AddKey(e.k0, e.k1, e.payload, extractFingerprint(e.k0, e.k1, fpSize))
-			}
-			if err := b.buildBlockZeroCopy(); err != nil {
-				wg.Wait()
-				return errors.Join(err, u.cleanup(), b.cleanup())
-			}
-		}
-
-		wg.Wait()
-	}
-
-	if err := u.cleanup(); err != nil {
-		return errors.Join(err, b.cleanup())
-	}
-	b.unsortedBuf = nil
-	return b.iw.finalize()
-}
-
-// finishUnsortedParallel reads partitions and dispatches blocks to workers.
-// Uses pipelined partition processing: reads partition P+1 in background
-// while dispatching blocks from partition P.
-func (b *Builder) finishUnsortedParallel() error {
-	b.initParallelWorkers()
-
-	u := b.unsortedBuf
-	numParts := u.numPartitions
-
-	type readResult struct {
-		entries [][]routedEntry
-		err     error
-	}
-
-	var nextResult *readResult
-
-	// Per-pipeline-buffer fences: workers signal Done() after reading entries,
-	// allowing the flatBuf to be safely reused for the next partition read.
-	// This eliminates the need to copy entries from flatBuf to pool slices.
-	var bufFence [2]sync.WaitGroup
-
-	// Start reading partition 0
-	if numParts > 0 {
-		entries, err := u.readPartition(0, 0, u.readFlatBufs[0], u.readBlockIDs[0])
-		nextResult = &readResult{entries, err}
-	}
-
-	for p := range numParts {
-		currentResult := nextResult
-		if currentResult.err != nil {
-			return errors.Join(currentResult.err, u.cleanup(), b.cleanup())
-		}
-
-		pIdx := p % 2
-
-		// Start reading next partition in background.
-		// Fence: wait for workers to finish reading from the flatBuf before reusing it.
-		var wg sync.WaitGroup
-		if p+1 < numParts {
-			nextResult = &readResult{}
-			wg.Add(1)
-			result := nextResult
-			nextPart := p + 1
-			nextPIdx := nextPart % 2
-			fence := &bufFence[nextPIdx]
-			go func() {
-				defer wg.Done()
-				// Wait for workers using this flatBuf to finish reading entries.
-				// For the first use of each buffer, the fence count is 0 (instant).
-				fence.Wait()
-				result.entries, result.err = u.readPartition(nextPart, nextPIdx, u.readFlatBufs[nextPIdx], u.readBlockIDs[nextPIdx])
-			}()
-		}
-
-		// Dispatch blocks from current partition directly from flatBuf.
-		// Workers signal bufFence[pIdx] after reading entries, allowing
-		// flatBuf[pIdx] to be reused when the next same-parity partition reads.
-		partStartBlock := uint32(p * u.blocksPerPart)
-		for localIdx, entries := range currentResult.entries {
-			blockID := partStartBlock + uint32(localIdx)
-
-			if blockID%blockContextCheckInterval == 0 {
-				select {
-				case <-b.ctx.Done():
-					wg.Wait()
-					return errors.Join(b.ctx.Err(), u.cleanup(), b.cleanup())
-				default:
-				}
-				if b.writerDone != nil {
-					select {
-					case err := <-b.writerDone:
-						b.writerErr = err
-						wg.Wait()
-						return errors.Join(err, u.cleanup(), b.cleanup())
-					default:
-					}
-				}
-			}
-
-			if len(entries) == 0 {
-				if err := b.dispatchEmptyBlock(blockID); err != nil {
-					wg.Wait()
-					return errors.Join(err, u.cleanup(), b.cleanup())
-				}
-				continue
-			}
-
-			// Dispatch entries directly from flatBuf (zero-copy).
-			// Worker signals bufFence[pIdx].Done() after reading entries.
-			bufFence[pIdx].Add(1)
-			work := blockWork{
-				blockID:    blockID,
-				entries:    entries,
-				fenceWg:    &bufFence[pIdx],
-				keysBefore: b.keysBefore,
-			}
-			b.keysBefore += uint64(len(entries))
-			b.nextBlockToWrite = blockID + 1
-
-			select {
-			case b.workChan <- work:
-			case <-b.workerCtx.Done():
-				wg.Wait()
-				return errors.Join(b.workerCtx.Err(), u.cleanup(), b.cleanup())
-			case err := <-b.writerDone:
-				b.writerErr = err
-				wg.Wait()
-				return errors.Join(err, u.cleanup(), b.cleanup())
-			}
-		}
-
-		wg.Wait()
-	}
-
-	// Wait for all remaining workers to finish with flatBuf data before cleanup.
-	bufFence[0].Wait()
-	bufFence[1].Wait()
-
-	if err := u.cleanup(); err != nil {
-		return errors.Join(err, b.cleanup())
-	}
-	b.unsortedBuf = nil
-
-	return b.drainParallelPipeline()
-}

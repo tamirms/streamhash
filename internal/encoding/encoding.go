@@ -95,11 +95,12 @@ func WriteEntryGeneric(basePtr unsafe.Pointer, pos, entrySize int, fp uint32, pa
 	}
 
 	// Write payload (optimized for common sizes)
-	payloadPtr := unsafe.Add(ptr, fpSize)
 	payloadSize := entrySize - fpSize
+	if payloadSize == 0 {
+		return
+	}
+	payloadPtr := unsafe.Add(ptr, fpSize)
 	switch payloadSize {
-	case 0:
-		// no payload
 	case 4:
 		*(*uint32)(payloadPtr) = uint32(payload)
 	case 8:

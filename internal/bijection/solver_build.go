@@ -1,7 +1,7 @@
 package bijection
 
 import (
-	streamerrors "github.com/tamirms/streamhash/errors"
+	"github.com/tamirms/streamhash/internal/sherr"
 )
 
 func (bb *Builder) solveBijections() error {
@@ -98,7 +98,7 @@ func (bb *Builder) solveSplitBucket(bucketIdx int, bucket []bucketEntry) (uint32
 	}
 
 	if !foundSeed0 {
-		return 0, 0, streamerrors.ErrSplitBucketSeedSearchFailed
+		return 0, 0, sherr.ErrSplitBucketSeedSearchFailed
 	}
 
 	// Check if seed0 exceeds Golomb-Rice encoding limit for this splitPoint
@@ -209,7 +209,7 @@ func (bb *Builder) solveExtended(bucket []bucketEntry, size int) (uint32, error)
 	for i := 0; i < size-1; i++ {
 		for j := i + 1; j < size; j++ {
 			if bucket[i].mixParts == bucket[j].mixParts {
-				return 0, streamerrors.ErrDuplicateKey
+				return 0, sherr.ErrDuplicateKey
 			}
 		}
 	}
@@ -241,7 +241,7 @@ func (bb *Builder) solveExtendedBitmask(bucket []bucketEntry, size int) (uint32,
 		}
 	}
 
-	return 0, streamerrors.ErrDuplicateKey
+	return 0, sherr.ErrDuplicateKey
 }
 
 func (bb *Builder) solveExtendedArray(bucket []bucketEntry, size int) (uint32, error) {
@@ -271,5 +271,5 @@ func (bb *Builder) solveExtendedArray(bucket []bucketEntry, size int) (uint32, e
 		}
 	}
 
-	return 0, streamerrors.ErrDuplicateKey
+	return 0, sherr.ErrDuplicateKey
 }
