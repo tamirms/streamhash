@@ -97,6 +97,6 @@ func TestLargeBucketSolverNoCrash(t *testing.T) {
 	const size = 65
 	bucket := randomBucket(rng, size)
 	if seed, err := bb.solveExtendedArray(bucket, size); err == nil {
-		verifyBijection(t, bucket, size, seed)
+		verifyBijection(t, bucket, seed, uint32(size))
 	}
 }
