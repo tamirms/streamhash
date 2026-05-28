@@ -154,13 +154,14 @@ func (u *unsortedBuffer) readRegion(fd int, offset, regionBytes int64, readBuf [
 // mergeBlockCounts sums block counts from all writers into mergedBlockCounts.
 //
 // The per-writer counts are uint16. A single block can only exceed 65535 keys
-// (and thus wrap) under catastrophic hash skew — such a block would also fail
-// the build-time maxKeysPerBlock guard. We guard against the silent
-// mis-bucketing a wrap would cause by verifying that the merged counts sum to
-// the expected key total (already validated against the user-declared count in
-// Finish). A mismatch means a count wrapped, so we abort rather than emit a
-// corrupt index. The grand total is accumulated inside the existing merge loop
-// (no extra traversal), so this guard adds only a register-add per merged entry.
+// (and thus wrap) under catastrophic hash skew. Such a block is unbuildable
+// anyway (it far exceeds maxKeysPerBlock), but that guard fires later during
+// block construction — this check runs first, here in the flush/merge phase,
+// and is the only thing standing between a uint16 wrap and silent mis-bucketing
+// in the read phase. We verify the merged counts sum to the expected key total
+// (already validated against the user-declared count in Finish); a mismatch
+// means a count wrapped, so we abort rather than emit a corrupt index. The
+// total is accumulated inside the existing merge loop (no extra traversal).
 func (u *unsortedBuffer) mergeBlockCounts(allWS []*writerState) error {
 	u.mergedBlockCounts = make([][]int, u.numPartitions)
 	var total uint64
@@ -416,10 +417,7 @@ func (ub *UnsortedBuilder) finishUnsortedFastPath() error {
 	if b.workers > 1 {
 		return b.drainParallelPipeline()
 	}
-	if err := b.iw.finalize(); err != nil {
-		return errors.Join(err, b.cleanup())
-	}
-	return nil
+	return b.finalizeIndex()
 }
 
 // finishUnsortedSingleThreaded reads partitions sequentially and builds blocks
@@ -506,10 +504,7 @@ func (ub *UnsortedBuilder) finishUnsortedSingleThreaded() error {
 	}
 	ub.unsortedBuf = nil
 
-	if err := b.iw.finalize(); err != nil {
-		return errors.Join(err, b.cleanup())
-	}
-	return nil
+	return b.finalizeIndex()
 }
 
 // finishUnsortedParallel reads partitions and dispatches blocks to workers.

@@ -385,10 +385,7 @@ func (b *builder) drainParallelPipeline() error {
 		return errors.Join(primaryErr, b.cleanup())
 	}
 
-	if err := b.iw.finalize(); err != nil {
-		return errors.Join(err, b.cleanup())
-	}
-	return nil
+	return b.finalizeIndex()
 }
 
 // shutdownWorkers closes the work channel and waits for worker and writer

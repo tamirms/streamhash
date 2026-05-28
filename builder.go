@@ -276,10 +276,7 @@ func (b *builder) finishSingleThreaded() error {
 		}
 	}
 
-	if err := b.iw.finalize(); err != nil {
-		return errors.Join(err, b.cleanup())
-	}
-	return nil
+	return b.finalizeIndex()
 }
 
 // buildBlock builds the current block into reusable buffers and writes via pwrite.
@@ -325,6 +322,16 @@ func (b *builder) close() error {
 func (b *builder) cleanup() error {
 	b.shutdownWorkers()
 	return errors.Join(b.iw.close(), os.Remove(b.output))
+}
+
+// finalizeIndex finalizes the index writer, deleting the partial output file if
+// finalization fails — otherwise a failed Finish would leave a corrupt index on
+// disk, since Close() after Finish is a no-op.
+func (b *builder) finalizeIndex() error {
+	if err := b.iw.finalize(); err != nil {
+		return errors.Join(err, b.cleanup())
+	}
+	return nil
 }
 
 // SortedBuilder builds an index from keys that arrive in block-sorted order.
