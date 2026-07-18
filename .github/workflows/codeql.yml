@@ -27,7 +27,7 @@ jobs:
 
       # Install the exact toolchain from go.mod before CodeQL builds, so the
       # extractor compiles against go1.26 rather than a runner-default Go.
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
